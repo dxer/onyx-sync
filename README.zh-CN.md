@@ -100,7 +100,7 @@ pnpm start
 **方式 B —— Docker（CI 预构建的 Alpine 镜像）：**
 
 ```bash
-# 使用 ghcr.io/dxer/onyx:latest（多架构：amd64 + arm64）
+# 使用 ghcr.io/dxer/onyx:latest（linux/amd64）
 docker compose up -d
 ```
 
