@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Onyx: Self-hosted Zero-Knowledge E2EE Sync Server for Obsidian",
+  "packageManager": "pnpm@11.17.0",
   "main": "dist/node/entry-node.js",
   "scripts": {
     "build:shared": "pnpm --filter=@onyx/shared build",

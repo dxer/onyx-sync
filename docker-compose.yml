@@ -2,9 +2,12 @@ version: '3.8'
 
 services:
   onyx:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Prebuilt multi-arch Alpine image (auto-built by CI on every push to main)
+    image: ghcr.io/dxer/onyx:latest
+    # Or build locally from source:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: onyx-sync-server
     restart: unless-stopped
     ports:

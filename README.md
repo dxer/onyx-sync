@@ -97,9 +97,10 @@ pnpm start
 
 Console is now live at `http://localhost:8080`.
 
-**Option B — Docker:**
+**Option B — Docker (prebuilt Alpine image, auto-built by CI):**
 
 ```bash
+# uses ghcr.io/dxer/onyx:latest (multi-arch: amd64 + arm64)
 docker compose up -d
 ```
 

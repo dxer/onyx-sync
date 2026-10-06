@@ -97,9 +97,10 @@ pnpm start
 
 控制台即刻运行在 `http://localhost:8080`。
 
-**方式 B —— Docker：**
+**方式 B —— Docker（CI 预构建的 Alpine 镜像）：**
 
 ```bash
+# 使用 ghcr.io/dxer/onyx:latest（多架构：amd64 + arm64）
 docker compose up -d
 ```
 
