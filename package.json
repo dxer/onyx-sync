@@ -1,0 +1,37 @@
+{
+  "name": "onyx",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Onyx: Self-hosted Zero-Knowledge E2EE Sync Server for Obsidian",
+  "main": "dist/node/entry-node.js",
+  "scripts": {
+    "build:shared": "pnpm --filter=@onyx/shared build",
+    "build:node": "tsup src/entry-node.ts --format cjs --out-dir dist/node",
+    "build:worker": "tsup src/entry-worker.ts --format esm --out-dir dist/worker",
+    "build:server": "pnpm build:node && pnpm build:worker",
+    "build:plugin": "pnpm --filter=onyx-sync build",
+    "build": "pnpm build:shared && pnpm build:server && pnpm build:plugin",
+    "start": "node dist/node/entry-node.js",
+    "dev": "tsx watch src/entry-node.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@hono/node-server": "^1.13.8",
+    "@onyx/shared": "workspace:*",
+    "better-sqlite3": "^11.8.1",
+    "hono": "^4.7.2",
+    "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.9",
+    "@types/ws": "^8.5.14",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.7",
+    "wrangler": "^3.111.0"
+  }
+}

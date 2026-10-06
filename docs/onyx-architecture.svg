@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="350" viewBox="0 0 880 350" role="img" aria-label="Onyx sync architecture">
+  <defs>
+    <marker id="oArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111111"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Title ===== -->
+  <text x="440" y="30" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#111111">Onyx · Zero-Knowledge Sync Architecture</text>
+  <text x="440" y="48" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#888888">The server only ever handles ciphertext — keys never leave your devices</text>
+
+  <!-- ===== Clients zone ===== -->
+  <rect x="30" y="70" width="380" height="245" rx="12" fill="#fafafa" stroke="#eaeaea"/>
+  <text x="220" y="94" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="600" fill="#666666" letter-spacing="1">YOUR DEVICES · TRUSTED</text>
+
+  <!-- Desktop box -->
+  <rect x="60" y="110" width="150" height="100" rx="10" fill="#ffffff" stroke="#eaeaea"/>
+  <rect x="84" y="120" width="18" height="12" rx="2" fill="none" stroke="#111111" stroke-width="1.5"/>
+  <path d="M81 132 h24 M74 136 h38" stroke="#111111" stroke-width="1.5" fill="none"/>
+  <text x="135" y="152" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#111111">Desktop</text>
+  <text x="135" y="170" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">Win · macOS · Linux</text>
+  <rect x="85" y="180" width="100" height="18" rx="9" fill="#111111"/>
+  <text x="135" y="192.5" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="600" fill="#ffffff">holds the keys</text>
+
+  <!-- Mobile box -->
+  <rect x="230" y="110" width="150" height="100" rx="10" fill="#ffffff" stroke="#eaeaea"/>
+  <rect x="298" y="120" width="14" height="22" rx="3" fill="none" stroke="#111111" stroke-width="1.5"/>
+  <text x="305" y="160" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#111111">Mobile</text>
+  <text x="305" y="176" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">iOS · Android</text>
+  <rect x="255" y="182" width="100" height="18" rx="9" fill="#111111"/>
+  <text x="305" y="194.5" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="600" fill="#ffffff">holds the keys</text>
+
+  <!-- Conflict resolution note -->
+  <rect x="60" y="230" width="320" height="60" rx="10" fill="#ffffff" stroke="#eaeaea" stroke-dasharray="4 3"/>
+  <text x="220" y="254" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="600" fill="#111111">On-device conflict resolution</text>
+  <text x="220" y="272" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">3-way merge · conflict copies for binaries</text>
+
+  <!-- ===== Server zone ===== -->
+  <rect x="470" y="70" width="380" height="245" rx="12" fill="#fafafa" stroke="#eaeaea"/>
+  <text x="660" y="94" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="600" fill="#666666" letter-spacing="1">ONYX SERVER · ZERO-KNOWLEDGE</text>
+
+  <!-- Router box -->
+  <rect x="500" y="112" width="150" height="84" rx="10" fill="#ffffff" stroke="#eaeaea"/>
+  <circle cx="575" cy="136" r="9" fill="none" stroke="#111111" stroke-width="1.5"/>
+  <circle cx="575" cy="136" r="3" fill="#111111"/>
+  <text x="575" y="164" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#111111">Hono Router</text>
+  <text x="575" y="181" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">REST · WebSocket</text>
+
+  <!-- Metadata cylinder -->
+  <ellipse cx="712" cy="150" rx="55" ry="16" fill="#ffffff" stroke="#eaeaea"/>
+  <path d="M657 150 v34 a55 16 0 0 0 110 0 v-34" fill="#ffffff" stroke="#eaeaea"/>
+  <ellipse cx="712" cy="150" rx="55" ry="16" fill="none" stroke="#eaeaea"/>
+  <text x="712" y="122" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#111111">Metadata</text>
+  <text x="712" y="137" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">SQLite / D1</text>
+  <text x="712" y="192" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="9" fill="#888888">versions · enc paths</text>
+
+  <!-- Blob cylinder -->
+  <ellipse cx="575" cy="252" rx="55" ry="16" fill="#ffffff" stroke="#eaeaea"/>
+  <path d="M520 252 v28 a55 16 0 0 0 110 0 v-28" fill="#ffffff" stroke="#eaeaea"/>
+  <ellipse cx="575" cy="252" rx="55" ry="16" fill="none" stroke="#eaeaea"/>
+  <text x="575" y="230" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#111111">Blob Store</text>
+  <text x="575" y="245" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#666666">FS / S3 / R2</text>
+  <text x="575" y="288" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="9" fill="#888888">/blobs/vault/hash</text>
+
+  <!-- Console box -->
+  <rect x="668" y="230" width="150" height="60" rx="10" fill="#ffffff" stroke="#eaeaea"/>
+  <rect x="682" y="242" width="20" height="14" rx="2" fill="none" stroke="#111111" stroke-width="1.5"/>
+  <path d="M686 242 v-3 h12 v3 M692 249 v5" stroke="#111111" stroke-width="1.5" fill="none"/>
+  <text x="758" y="257" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#111111">Web Console</text>
+  <text x="758" y="274" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="9" fill="#888888">users · vaults · tokens</text>
+
+  <!-- ===== Connections ===== -->
+  <path d="M410 154 C 440 154, 455 154, 497 154" stroke="#111111" stroke-width="1.8" fill="none" marker-end="url(#oArr)"/>
+  <text x="453" y="138" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="9" fill="#666666">TLS · ciphertext</text>
+  <text x="453" y="174" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="9" fill="#666666">ost_ token auth</text>
+
+  <path d="M575 196 v46" stroke="#111111" stroke-width="1.5" fill="none" marker-end="url(#oArr)"/>
+  <path d="M650 196 C 668 208, 678 216, 686 226" stroke="#111111" stroke-width="1.5" fill="none" marker-end="url(#oArr)"/>
+
+  <text x="660" y="336" text-anchor="middle" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-style="italic" fill="#888888">the server cannot derive keys — it never receives the passphrase</text>
+</svg>

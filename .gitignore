@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Runtime data (encrypted vault blobs + SQLite database — private!)
+data/
+
+# Build artifacts
+dist/
+shared/dist/
+plugin/main.js
+*.tsbuildinfo
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# Wrangler
+.wrangler/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

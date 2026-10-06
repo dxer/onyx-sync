@@ -1,0 +1,21 @@
+{
+  "name": "onyx-sync",
+  "version": "1.0.0",
+  "description": "Zero-Knowledge End-to-End Encrypted sync plugin for Obsidian (Onyx)",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs"
+  },
+  "dependencies": {
+    "@onyx/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "tslib": "^2.8.1",
+    "typescript": "^5.8.2"
+  }
+}
