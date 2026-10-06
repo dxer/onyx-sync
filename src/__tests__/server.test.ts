@@ -44,8 +44,8 @@ describe('Token Capability Session & Partitioned Sync Tests', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it('registers Alice and Bob on platform', async () => {
-    // 1. Register Alice
+  it('provisions Alice (initial admin) and Bob (admin-created user)', async () => {
+    // 1. Public registration is open only while the system is empty — first user becomes admin
     const resAlice = await app.request('/api/v1/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -53,16 +53,36 @@ describe('Token Capability Session & Partitioned Sync Tests', () => {
     });
     expect(resAlice.status).toBe(201);
     const dataAlice = await resAlice.json();
+    expect(dataAlice.user.role).toBe('admin');
     aliceMasterToken = dataAlice.token;
 
-    // 2. Register Bob
-    const resBob = await app.request('/api/v1/auth/register', {
+    // 2. Public registration is closed once an account exists
+    const resStranger = await app.request('/api/v1/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'stranger', password: 'password999' })
+    });
+    expect(resStranger.status).toBe(403);
+
+    // 3. Admin provisions Bob
+    const resBob = await app.request('/api/v1/admin/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${aliceMasterToken}`
+      },
+      body: JSON.stringify({ username: 'bob', password: 'password456', role: 'user' })
+    });
+    expect(resBob.status).toBe(201);
+
+    // 4. Bob logs in
+    const loginBob = await app.request('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: 'bob', password: 'password456' })
     });
-    expect(resBob.status).toBe(201);
-    const dataBob = await resBob.json();
+    expect(loginBob.status).toBe(200);
+    const dataBob = await loginBob.json();
     bobMasterToken = dataBob.token;
   });
 
