@@ -7,7 +7,6 @@ data/
 # Build artifacts
 dist/
 shared/dist/
-plugin/main.js
 *.tsbuildinfo
 
 # Environment secrets

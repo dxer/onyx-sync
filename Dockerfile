@@ -14,7 +14,6 @@ WORKDIR /app
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY shared/package.json shared/package.json
-COPY plugin/package.json plugin/package.json
 
 RUN pnpm install --prod --frozen-lockfile
 
@@ -26,7 +25,6 @@ WORKDIR /app
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
 COPY shared/package.json shared/package.json
-COPY plugin/package.json plugin/package.json
 
 RUN pnpm install --frozen-lockfile
 
@@ -53,7 +51,6 @@ RUN mkdir -p /data/blobs
 # prod node_modules (musl-native) + shared dist + compiled server
 COPY --from=deps /app/node_modules node_modules
 COPY --from=deps /app/shared shared
-COPY --from=deps /app/plugin plugin
 COPY --from=builder /app/shared/dist shared/dist
 COPY --from=builder /app/dist/node dist/node
 

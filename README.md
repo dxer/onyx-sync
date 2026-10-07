@@ -199,23 +199,23 @@ to interval polling.
 ## Project Layout
 
 ```
-onyx/
+onyx-sync/
 ├── src/           # Onyx Server — Hono app, storage drivers, console
-├── plugin/        # Onyx Sync — Obsidian plugin (all platforms)
-├── shared/        # @onyx/shared — crypto, 3-way merge, protocol types
-├── docs/          # logos & diagrams
-├── Dockerfile
+├── shared/        # @onyx/shared — crypto, protocol types
+├── docs/          # logos, diagrams & social cards
+├── Dockerfile     # Multi-arch Alpine image
 ├── docker-compose.yml
 └── wrangler.toml  # Cloudflare Workers deployment
 ```
+
+> **Looking for the Obsidian plugin?** The client plugin is maintained in the dedicated repository: [onyx-sync-obsidian](https://github.com/dxer/onyx-sync-obsidian).
 
 ## Development
 
 ```bash
 pnpm install
 pnpm dev            # server with hot reload
-pnpm build          # everything: shared + server + plugin
-pnpm build:plugin   # plugin only
+pnpm build          # shared + server
 pnpm test           # unit tests
 ```
 

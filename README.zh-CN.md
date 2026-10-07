@@ -197,23 +197,23 @@ DELETE /api/v1/user/tokens/:tokenId       # 吊销凭据
 ## 项目结构
 
 ```
-onyx/
+onyx-sync/
 ├── src/           # Onyx 服务端 —— Hono 应用、存储驱动、控制台
-├── plugin/        # Onyx Sync —— Obsidian 插件（全平台）
-├── shared/        # @onyx/shared —— 加密、三路合并、协议类型
-├── docs/          # Logo 与图表
-├── Dockerfile
+├── shared/        # @onyx/shared —— 加密、协议类型
+├── docs/          # Logo、图表与社交宣传卡片
+├── Dockerfile     # 多架构 Alpine 镜像构建
 ├── docker-compose.yml
 └── wrangler.toml  # Cloudflare Workers 部署配置
 ```
+
+> **正在寻找 Obsidian 插件？** 客户端插件已迁移至独立开源仓库维护：[onyx-sync-obsidian](https://github.com/dxer/onyx-sync-obsidian)。
 
 ## 开发
 
 ```bash
 pnpm install
 pnpm dev            # 服务端热重载
-pnpm build          # 全量构建：shared + 服务端 + 插件
-pnpm build:plugin   # 仅构建插件
+pnpm build          # 构建：shared + 服务端
 pnpm test           # 单元测试
 ```
 
