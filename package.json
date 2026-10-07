@@ -10,9 +10,7 @@
     "build:node": "tsup src/entry-node.ts --format cjs --out-dir dist/node",
     "build:worker": "tsup src/entry-worker.ts --format esm --out-dir dist/worker",
     "build:server": "pnpm build:node && pnpm build:worker",
-    "build:plugin": "pnpm --filter=onyx-sync build",
-    "plugin:prep": "node scripts/sync-plugin-release.mjs",
-    "build": "pnpm build:shared && pnpm build:server && pnpm build:plugin",
+    "build": "pnpm build:shared && pnpm build:server",
     "start": "node dist/node/entry-node.js",
     "dev": "tsx watch src/entry-node.ts",
     "test": "vitest run"

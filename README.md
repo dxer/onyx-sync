@@ -120,9 +120,11 @@ wrangler deploy
 
 ### 3. Install the Obsidian plugin
 
-1. Copy `plugin/main.js` + `plugin/manifest.json` into `<vault>/.obsidian/plugins/onyx-sync/`
-2. Enable **Onyx Sync** in Obsidian settings
-3. Fill in:
+Install the official client plugin from [onyx-sync-obsidian](https://github.com/dxer/onyx-sync-obsidian):
+- **Via Community Plugins**: Search for **Onyx Sync** in Obsidian settings (or install via BRAT).
+- **Manual Install**: Download `main.js` & `manifest.json` from [Plugin Releases](https://github.com/dxer/onyx-sync-obsidian/releases) into `<vault>/.obsidian/plugins/onyx-sync/`.
+
+Enable **Onyx Sync** in Obsidian settings and fill in:
 
 | Field | Value |
 | :--- | :--- |

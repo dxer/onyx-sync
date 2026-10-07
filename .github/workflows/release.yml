@@ -1,8 +1,7 @@
-name: Release Plugin
+name: Release Server
 
-# On version tag (v*): run tests, build the Obsidian plugin,
-# and publish a GitHub Release with downloadable main.js / manifest.json
-# (BRAT-compatible — Obsidian users can install directly from the release)
+# On version tag (v*): run tests, build server packages,
+# and publish a GitHub Release for the Onyx Sync Server.
 on:
   push:
     tags: ['v*']
@@ -28,20 +27,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @onyx/shared must be built first — vitest resolves its package entry
-      - name: Build shared package
-        run: pnpm build:shared
+      - name: Build packages
+        run: pnpm build
 
       - name: Run tests
         run: pnpm test
-
-      - name: Build plugin
-        run: pnpm build:plugin
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            plugin/main.js
-            plugin/manifest.json

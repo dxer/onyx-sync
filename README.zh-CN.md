@@ -120,9 +120,11 @@ wrangler deploy
 
 ### 3. 安装 Obsidian 插件
 
-1. 将 `plugin/main.js` + `plugin/manifest.json` 复制到 `<仓库>/.obsidian/plugins/onyx-sync/`
-2. 在 Obsidian 设置中启用 **Onyx Sync**
-3. 填写：
+从官方客户端仓库 [onyx-sync-obsidian](https://github.com/dxer/onyx-sync-obsidian) 安装：
+- **社区插件市场安装**：在 Obsidian 设置中的“社区插件”搜索 **Onyx Sync** 安装（或通过 BRAT 插件测试版安装）；
+- **手动安装**：从 [插件 Release 页面](https://github.com/dxer/onyx-sync-obsidian/releases) 下载 `main.js` 和 `manifest.json`，放进 `<知识库>/.obsidian/plugins/onyx-sync/`。
+
+在 Obsidian 设置中启用 **Onyx Sync** 并填写：
 
 | 字段 | 值 |
 | :--- | :--- |
