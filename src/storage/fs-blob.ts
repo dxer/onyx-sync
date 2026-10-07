@@ -1,6 +1,9 @@
-import { mkdir, writeFile, readFile, access, rm } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, access, rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { IBlobStore } from './types';
+import type { IBlobStore, BlobListPage } from './types';
+import { isValidBlobFileName, normalizeBlobHash } from './blob-utils';
+
+const LIST_PAGE_SIZE = 1000;
 
 export class LocalFsBlobStore implements IBlobStore {
   private blobsDir: string;
@@ -19,8 +22,7 @@ export class LocalFsBlobStore implements IBlobStore {
 
   private getFilePath(vaultId: string, hash: string): string {
     const safeVault = this.sanitize(vaultId);
-    const safeHash = hash.replace(/[^a-f0-9]/gi, '');
-    return join(this.blobsDir, safeVault, safeHash);
+    return join(this.blobsDir, safeVault, normalizeBlobHash(hash));
   }
 
   private getVaultDir(vaultId: string): string {
@@ -40,8 +42,9 @@ export class LocalFsBlobStore implements IBlobStore {
     try {
       const buffer = await readFile(filePath);
       return new Uint8Array(buffer);
-    } catch {
-      return null;
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
     }
   }
 
@@ -50,8 +53,9 @@ export class LocalFsBlobStore implements IBlobStore {
     try {
       await access(filePath);
       return true;
-    } catch {
-      return false;
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return false;
+      throw error;
     }
   }
 
@@ -75,5 +79,39 @@ export class LocalFsBlobStore implements IBlobStore {
   async deleteVault(vaultId: string): Promise<void> {
     const vaultDir = this.getVaultDir(vaultId);
     await rm(vaultDir, { recursive: true, force: true });
+  }
+
+  async list(vaultId: string, cursor?: string): Promise<BlobListPage> {
+    const vaultDir = this.getVaultDir(vaultId);
+    let entries: string[];
+    try {
+      entries = await readdir(vaultDir);
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return { blobs: [] };
+      throw error;
+    }
+
+    const hashes = entries.filter(isValidBlobFileName).sort();
+    const offset = cursor ? Math.max(0, Number(cursor) || 0) : 0;
+    const page = hashes.slice(offset, offset + LIST_PAGE_SIZE);
+    const blobs = await Promise.all(
+      page.map(async (hash) => {
+        try {
+          const info = await stat(join(vaultDir, hash));
+          return { hash, lastModified: info.mtimeMs };
+        } catch {
+          return { hash, lastModified: null };
+        }
+      })
+    );
+
+    return {
+      blobs,
+      nextCursor: offset + page.length < hashes.length ? String(offset + page.length) : undefined
+    };
+  }
+
+  async deleteBlob(vaultId: string, hash: string): Promise<void> {
+    await rm(this.getFilePath(vaultId, hash), { force: true });
   }
 }

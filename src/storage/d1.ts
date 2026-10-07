@@ -10,14 +10,56 @@ import type {
   CommitResult,
   VaultActivityDay
 } from '@onyx/shared';
-import type { IMetadataStore, UserWithSecret, TokenValidationResult } from './types';
-import { TABLES_SQL, INDEXES_SQL } from './sqlite-common';
+import type {
+  CreateTokenOptions,
+  DeletionJob,
+  DeletionJobStatus,
+  IMetadataStore,
+  UserWithSecret,
+  TokenValidationResult
+} from './types';
+import { StorageConflictError, StorageNotFoundError } from './errors';
+import { newTokenSecret, tokenExpiry } from './token-utils';
+import {
+  AUTH_TOKEN_SELECT,
+  INDEXES_SQL,
+  MASTER_TOKEN_SQL,
+  TABLES_SQL,
+  TOKEN_SESSION_SQL,
+  canonicalCommitPayload
+} from './sqlite-common';
+
+const textEncoder = new TextEncoder();
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashTokenSecret(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', textEncoder.encode(token));
+  return toHex(new Uint8Array(digest));
+}
+
+const COMMIT_CAS_ATTEMPTS = 6;
+
+interface CommitReceiptRow {
+  payloadHash: string;
+  newVersion: number;
+  committedCount: number;
+  changesJson: string;
+}
 
 export class D1MetadataStore implements IMetadataStore {
   private d1: D1Database;
 
   constructor(d1: D1Database) {
     this.d1 = d1;
+  }
+
+  private async getCommitPayloadHash(changes: CommitChangeItem[]): Promise<string> {
+    const data = textEncoder.encode(canonicalCommitPayload(changes));
+    const digest = await crypto.subtle.digest('SHA-256', data);
+    return toHex(new Uint8Array(digest));
   }
 
   async init(): Promise<void> {
@@ -36,9 +78,8 @@ export class D1MetadataStore implements IMetadataStore {
     try {
       await this.d1.prepare('ALTER TABLE vaults ADD COLUMN user_id TEXT DEFAULT ""').run();
     } catch {}
-    try {
-      await this.d1.prepare('ALTER TABLE user_tokens ADD COLUMN vault_id TEXT DEFAULT ""').run();
-    } catch {}
+
+    await this.migrateLegacyUserTokens();
 
     const indexStatements = INDEXES_SQL.split(';')
       .map((s) => s.trim())
@@ -51,6 +92,64 @@ export class D1MetadataStore implements IMetadataStore {
     }
   }
 
+  /** Upgrades the legacy plaintext user_tokens table into hash-only auth_tokens, then drops it. */
+  private async migrateLegacyUserTokens(): Promise<void> {
+    let rows: Array<Record<string, unknown>>;
+    try {
+      // Legacy databases may predate the lifecycle columns; degrade gracefully.
+      const res = await this.d1
+        .prepare(
+          'SELECT token, user_id, vault_id, device_name, token_type, expires_at, revoked_at, revoked_reason, created_at, last_used_at FROM user_tokens'
+        )
+        .all();
+      rows = (res.results || []) as typeof rows;
+    } catch {
+      try {
+        const res = await this.d1
+          .prepare('SELECT token, user_id, vault_id, device_name, created_at, last_used_at FROM user_tokens')
+          .all();
+        rows = (res.results || []) as typeof rows;
+      } catch {
+        return; // legacy table absent on fresh installs
+      }
+    }
+
+    const stmts: D1PreparedStatement[] = [];
+    for (const row of rows) {
+      const token = row.token as string | null;
+      if (!token) continue;
+      const vaultId = (row.vault_id as string | null) || '';
+      const rawType = row.token_type as string | null;
+      const tokenType = rawType === 'master' || rawType === 'device' ? rawType : vaultId ? 'device' : 'master';
+      // Legacy rows either had no expiry column or a placeholder value; only a
+      // genuinely future expiry is kept, otherwise the token gets a fresh window.
+      const legacyExpiry = (row.expires_at as number | null | undefined) ?? null;
+      const expiresAt = legacyExpiry !== null && legacyExpiry > Date.now() ? legacyExpiry : tokenExpiry(tokenType);
+      stmts.push(
+        this.d1
+          .prepare(
+            'INSERT OR IGNORE INTO auth_tokens (token_id, user_id, vault_id, device_name, token_hash, token_type, expires_at, revoked_at, revoked_reason, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          )
+          .bind(
+            crypto.randomUUID(),
+            row.user_id as string,
+            vaultId,
+            (row.device_name as string) || 'Device',
+            await hashTokenSecret(token),
+            tokenType,
+            expiresAt,
+            (row.revoked_at as number | null | undefined) ?? null,
+            (row.revoked_reason as string | null | undefined) ?? null,
+            (row.created_at as number | null | undefined) ?? Date.now(),
+            (row.last_used_at as number | null | undefined) ?? Date.now()
+          )
+      );
+    }
+    stmts.push(this.d1.prepare('DROP TABLE user_tokens'));
+    await this.d1.batch(stmts);
+  }
+
+  // User management
   async createUser(
     username: string,
     passwordHash: string,
@@ -108,14 +207,21 @@ export class D1MetadataStore implements IMetadataStore {
     }
   }
 
-  async createToken(userId: string, vaultId: string, deviceName: string): Promise<string> {
-    const token = `ost_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
+  // Token management (hash-only storage)
+  async createToken(
+    userId: string,
+    vaultId: string,
+    deviceName: string,
+    options?: CreateTokenOptions
+  ): Promise<string> {
+    const token = newTokenSecret();
+    const tokenType = options?.tokenType || (vaultId ? 'device' : 'master');
     const now = Date.now();
     await this.d1
       .prepare(
-        'INSERT INTO user_tokens (token, user_id, vault_id, device_name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)'
+        'INSERT INTO auth_tokens (token_id, user_id, vault_id, device_name, token_hash, token_type, expires_at, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .bind(token, userId, vaultId, deviceName, now, now)
+      .bind(crypto.randomUUID(), userId, vaultId, deviceName, await hashTokenSecret(token), tokenType, tokenExpiry(tokenType, options), now, now)
       .run();
 
     return token;
@@ -123,22 +229,14 @@ export class D1MetadataStore implements IMetadataStore {
 
   async verifyToken(token: string): Promise<TokenValidationResult | null> {
     const row = await this.d1
-      .prepare(
-        `SELECT u.id as u_id, u.username as u_username, u.role as u_role, u.created_at as u_created_at,
-                t.token, t.user_id as t_user_id, t.vault_id as t_vault_id, t.device_name as t_device_name, t.created_at as t_created_at, t.last_used_at as t_last_used_at,
-                v.id as v_id, v.user_id as v_user_id, v.name as v_name, v.salt as v_salt, v.latest_version as v_latest_version, v.created_at as v_created_at
-         FROM user_tokens t
-         JOIN users u ON t.user_id = u.id
-         LEFT JOIN vaults v ON t.vault_id = v.id
-         WHERE t.token = ?`
-      )
-      .bind(token)
+      .prepare(TOKEN_SESSION_SQL)
+      .bind(await hashTokenSecret(token), Date.now())
       .first<any>();
 
     if (row && row.v_id) {
       await this.d1
-        .prepare('UPDATE user_tokens SET last_used_at = ? WHERE token = ?')
-        .bind(Date.now(), token)
+        .prepare('UPDATE auth_tokens SET last_used_at = ? WHERE token_id = ?')
+        .bind(Date.now(), row.t_token_id)
         .run();
 
       return {
@@ -149,10 +247,12 @@ export class D1MetadataStore implements IMetadataStore {
           createdAt: row.u_created_at
         },
         tokenInfo: {
-          token: row.token,
+          tokenId: row.t_token_id,
           userId: row.t_user_id,
           vaultId: row.t_vault_id,
           deviceName: row.t_device_name,
+          tokenType: row.t_token_type,
+          expiresAt: row.t_expires_at,
           createdAt: row.t_created_at,
           lastUsedAt: Date.now()
         },
@@ -172,19 +272,14 @@ export class D1MetadataStore implements IMetadataStore {
 
   async verifyUserMasterToken(token: string): Promise<User | null> {
     const row = await this.d1
-      .prepare(
-        `SELECT u.id, u.username, u.role, u.created_at as createdAt 
-         FROM user_tokens t 
-         JOIN users u ON t.user_id = u.id 
-         WHERE t.token = ?`
-      )
-      .bind(token)
+      .prepare(MASTER_TOKEN_SQL)
+      .bind(await hashTokenSecret(token), Date.now())
       .first<User>();
 
     if (row) {
       await this.d1
-        .prepare('UPDATE user_tokens SET last_used_at = ? WHERE token = ?')
-        .bind(Date.now(), token)
+        .prepare('UPDATE auth_tokens SET last_used_at = ? WHERE token_hash = ?')
+        .bind(Date.now(), await hashTokenSecret(token))
         .run();
       return row;
     }
@@ -192,53 +287,57 @@ export class D1MetadataStore implements IMetadataStore {
     return null;
   }
 
-  async getToken(token: string): Promise<UserToken | null> {
+  async getTokenById(tokenId: string): Promise<UserToken | null> {
     const row = await this.d1
-      .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens WHERE token = ?`
-      )
-      .bind(token)
+      .prepare(`SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE token_id = ?`)
+      .bind(tokenId)
       .first<UserToken>();
     return row || null;
   }
 
-  async updateToken(token: string, deviceName: string): Promise<void> {
+  async isTokenActive(tokenId: string): Promise<boolean> {
+    const row = await this.d1
+      .prepare(
+        'SELECT 1 as active FROM auth_tokens WHERE token_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)'
+      )
+      .bind(tokenId, Date.now())
+      .first<{ active: number }>();
+    return Boolean(row);
+  }
+
+  async updateToken(tokenId: string, deviceName: string): Promise<void> {
     await this.d1
-      .prepare('UPDATE user_tokens SET device_name = ? WHERE token = ?')
-      .bind(deviceName, token)
+      .prepare('UPDATE auth_tokens SET device_name = ? WHERE token_id = ?')
+      .bind(deviceName, tokenId)
       .run();
   }
 
-  async rotateToken(oldToken: string): Promise<string | null> {
-    const existing = await this.getToken(oldToken);
+  async rotateToken(tokenId: string): Promise<string | null> {
+    const existing = await this.getTokenById(tokenId);
     if (!existing) return null;
 
-    const newToken = `ost_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`;
+    const tokenType = existing.tokenType === 'master' ? 'master' : 'device';
+    const newToken = newTokenSecret();
     const now = Date.now();
-    await this.d1.batch([
-      this.d1.prepare('DELETE FROM user_tokens WHERE token = ?').bind(oldToken),
-      this.d1
-        .prepare(
-          'INSERT INTO user_tokens (token, user_id, vault_id, device_name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)'
-        )
-        .bind(newToken, existing.userId, existing.vaultId, existing.deviceName, now, now)
-    ]);
+    await this.d1
+      .prepare(
+        'UPDATE auth_tokens SET token_hash = ?, expires_at = ?, revoked_at = NULL, revoked_reason = NULL, created_at = ?, last_used_at = ? WHERE token_id = ?'
+      )
+      .bind(await hashTokenSecret(newToken), tokenExpiry(tokenType), now, now, tokenId)
+      .run();
     return newToken;
   }
 
-  async deleteToken(token: string): Promise<void> {
-    await this.d1.prepare('DELETE FROM user_tokens WHERE token = ?').bind(token).run();
+  async deleteToken(tokenId: string): Promise<void> {
+    await this.d1
+      .prepare('UPDATE auth_tokens SET revoked_at = ?, revoked_reason = ? WHERE token_id = ?')
+      .bind(Date.now(), 'user_requested', tokenId)
+      .run();
   }
 
   async listUserTokens(userId: string): Promise<UserToken[]> {
     const res = await this.d1
-      .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens 
-         WHERE user_id = ? 
-         ORDER BY last_used_at DESC`
-      )
+      .prepare(`SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE user_id = ? ORDER BY last_used_at DESC`)
       .bind(userId)
       .all<UserToken>();
 
@@ -247,18 +346,14 @@ export class D1MetadataStore implements IMetadataStore {
 
   async listVaultTokens(vaultId: string): Promise<UserToken[]> {
     const res = await this.d1
-      .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens 
-         WHERE vault_id = ? 
-         ORDER BY last_used_at DESC`
-      )
+      .prepare(`SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE vault_id = ? ORDER BY last_used_at DESC`)
       .bind(vaultId)
       .all<UserToken>();
 
     return res.results || [];
   }
 
+  // Vault management
   async getVault(vaultId: string): Promise<Vault | null> {
     const row = await this.d1
       .prepare(
@@ -316,7 +411,8 @@ export class D1MetadataStore implements IMetadataStore {
     await this.d1.batch([
       this.d1.prepare('DELETE FROM file_records WHERE vault_id = ?').bind(vaultId),
       this.d1.prepare('DELETE FROM devices WHERE vault_id = ?').bind(vaultId),
-      this.d1.prepare('DELETE FROM user_tokens WHERE vault_id = ?').bind(vaultId),
+      this.d1.prepare('DELETE FROM auth_tokens WHERE vault_id = ?').bind(vaultId),
+      this.d1.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').bind(vaultId),
       this.d1.prepare('DELETE FROM vaults WHERE id = ?').bind(vaultId)
     ]);
   }
@@ -324,9 +420,9 @@ export class D1MetadataStore implements IMetadataStore {
   async getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]> {
     const results = await this.d1
       .prepare(
-        `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime 
-         FROM file_records 
-         WHERE vault_id = ? AND version > ? 
+        `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime
+         FROM file_records
+         WHERE vault_id = ? AND version > ?
          ORDER BY version ASC`
       )
       .bind(vaultId, sinceVersion)
@@ -351,78 +447,177 @@ export class D1MetadataStore implements IMetadataStore {
     }));
   }
 
+  private async readReceipt(vaultId: string, requestId: string): Promise<CommitReceiptRow | null> {
+    const receipt = await this.d1
+      .prepare(
+        'SELECT payload_hash as payloadHash, new_version as newVersion, committed_count as committedCount, changes_json as changesJson FROM commit_receipts WHERE vault_id = ? AND request_id = ?'
+      )
+      .bind(vaultId, requestId)
+      .first<CommitReceiptRow>();
+    return receipt || null;
+  }
+
   async commitChanges(
     vaultId: string,
     deviceId: string,
-    changes: CommitChangeItem[]
+    changes: CommitChangeItem[],
+    requestId?: string
   ): Promise<CommitResult> {
-    const vault = await this.d1
-      .prepare('SELECT latest_version FROM vaults WHERE id = ?')
-      .bind(vaultId)
-      .first<{ latest_version: number }>();
+    const payloadHash = await this.getCommitPayloadHash(changes);
 
-    if (!vault) {
-      throw new Error(`Vault ${vaultId} not found`);
-    }
-
-    const newVersion = vault.latest_version + 1;
-    const now = Date.now();
-    const batchStatements: D1PreparedStatement[] = [];
-
-    batchStatements.push(
-      this.d1
-        .prepare('UPDATE vaults SET latest_version = ? WHERE id = ?')
-        .bind(newVersion, vaultId)
-    );
-
-    for (const item of changes) {
-      const existing = await this.d1
-        .prepare('SELECT id FROM file_records WHERE vault_id = ? AND encrypted_path = ?')
-        .bind(vaultId, item.encryptedPath)
-        .first<{ id: string }>();
-
-      const isDel = item.isDeleted ? 1 : 0;
-
-      if (existing) {
-        batchStatements.push(
-          this.d1
-            .prepare(
-              `UPDATE file_records 
-               SET content_hash = ?, size = ?, version = ?, is_deleted = ?, mtime = ?, updated_at = ? 
-               WHERE id = ?`
-            )
-            .bind(item.contentHash, item.size, newVersion, isDel, item.mtime, now, existing.id)
-        );
-      } else {
-        const fileId = item.id || crypto.randomUUID();
-        batchStatements.push(
-          this.d1
-            .prepare(
-              `INSERT INTO file_records (id, vault_id, encrypted_path, content_hash, size, version, is_deleted, mtime, updated_at) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
-            .bind(fileId, vaultId, item.encryptedPath, item.contentHash, item.size, newVersion, isDel, item.mtime, now)
-        );
+    if (requestId) {
+      const receipt = await this.readReceipt(vaultId, requestId);
+      if (receipt) {
+        if (receipt.payloadHash !== payloadHash) {
+          throw new StorageConflictError('request-id-reuse', 'request-id-reuse');
+        }
+        return {
+          success: true,
+          newVersion: receipt.newVersion,
+          committedCount: receipt.committedCount,
+          requestId,
+          replayed: true,
+          changes: JSON.parse(receipt.changesJson)
+        };
       }
     }
 
-    batchStatements.push(
-      this.d1
-        .prepare(
-          `INSERT INTO devices (id, vault_id, device_name, last_seen) 
-           VALUES (?, ?, ?, ?) 
-           ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`
-        )
-        .bind(deviceId, vaultId, deviceId, now)
+    // CAS loop: the first batch statement only succeeds when latest_version is still
+    // the value we read, so version allocation is atomic under concurrency.
+    for (let attempt = 0; attempt < COMMIT_CAS_ATTEMPTS; attempt++) {
+      const vault = await this.d1
+        .prepare('SELECT latest_version FROM vaults WHERE id = ?')
+        .bind(vaultId)
+        .first<{ latest_version: number }>();
+
+      if (!vault) {
+        throw new StorageNotFoundError(`Vault ${vaultId} not found`);
+      }
+
+      const expectedVersion = vault.latest_version;
+      const newVersion = expectedVersion + 1;
+      const now = Date.now();
+      const committedChanges: Array<{ id: string; encryptedPath: string }> = [];
+
+      const stmts: D1PreparedStatement[] = [
+        this.d1
+          .prepare('UPDATE vaults SET latest_version = ? WHERE id = ? AND latest_version = ?')
+          .bind(newVersion, vaultId, expectedVersion)
+      ];
+
+      for (const item of changes) {
+        const existingById = item.id
+          ? await this.d1
+              .prepare('SELECT id FROM file_records WHERE vault_id = ? AND id = ?')
+              .bind(vaultId, item.id)
+              .first<{ id: string }>()
+          : null;
+        const existingByPath = await this.d1
+          .prepare('SELECT id FROM file_records WHERE vault_id = ? AND encrypted_path = ?')
+          .bind(vaultId, item.encryptedPath)
+          .first<{ id: string }>();
+
+        if (existingById && existingByPath && existingById.id !== existingByPath.id) {
+          throw new StorageConflictError(
+            'identity-conflict',
+            'File identity conflicts with encrypted path'
+          );
+        }
+
+        const existing = existingById || existingByPath;
+        const fileId = existing?.id || item.id || crypto.randomUUID();
+        const isDel = item.isDeleted ? 1 : 0;
+        committedChanges.push({ id: fileId, encryptedPath: item.encryptedPath });
+
+        if (existing) {
+          stmts.push(
+            this.d1
+              .prepare(
+                `UPDATE file_records
+                 SET encrypted_path = ?, content_hash = ?, size = ?, version = ?, is_deleted = ?, mtime = ?, updated_at = ?
+                 WHERE id = ?`
+              )
+              .bind(item.encryptedPath, item.contentHash, item.size, newVersion, isDel, item.mtime, now, existing.id)
+          );
+        } else {
+          stmts.push(
+            this.d1
+              .prepare(
+                `INSERT INTO file_records (id, vault_id, encrypted_path, content_hash, size, version, is_deleted, mtime, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              )
+              .bind(fileId, vaultId, item.encryptedPath, item.contentHash, item.size, newVersion, isDel, item.mtime, now)
+          );
+        }
+      }
+
+      if (requestId) {
+        stmts.push(
+          this.d1
+            .prepare(
+              'INSERT INTO commit_receipts (vault_id, request_id, payload_hash, new_version, committed_count, changes_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            )
+            .bind(vaultId, requestId, payloadHash, newVersion, changes.length, JSON.stringify(committedChanges), now)
+        );
+      }
+
+      stmts.push(
+        this.d1
+          .prepare(
+            `INSERT INTO devices (id, vault_id, device_name, last_seen)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`
+          )
+          .bind(deviceId, vaultId, deviceId, now)
+      );
+
+      let results: D1Result[];
+      try {
+        results = await this.d1.batch(stmts);
+      } catch (err: any) {
+        const message = String(err?.message || err);
+        if (requestId && message.includes('commit_receipts')) {
+          // A concurrent request with the same requestId won the insert; replay it.
+          const receipt = await this.readReceipt(vaultId, requestId);
+          if (receipt) {
+            if (receipt.payloadHash !== payloadHash) {
+              throw new StorageConflictError('request-id-reuse', 'request-id-reuse');
+            }
+            return {
+              success: true,
+              newVersion: receipt.newVersion,
+              committedCount: receipt.committedCount,
+              requestId,
+              replayed: true,
+              changes: JSON.parse(receipt.changesJson)
+            };
+          }
+        }
+        if (message.includes('file_records')) {
+          throw new StorageConflictError(
+            'identity-conflict',
+            'File identity conflicts with an existing record'
+          );
+        }
+        throw err;
+      }
+
+      if ((results[0]?.meta?.changes ?? 0) === 1) {
+        return {
+          success: true,
+          newVersion,
+          committedCount: changes.length,
+          requestId,
+          changes: committedChanges
+        };
+      }
+      // CAS lost the race; retry against the new latest_version
+    }
+
+    throw new StorageConflictError(
+      'version-conflict',
+      'Concurrent commits prevented version allocation; please retry'
     );
-
-    await this.d1.batch(batchStatements);
-
-    return {
-      success: true,
-      newVersion,
-      committedCount: changes.length
-    };
   }
 
   async getVaultActivity(vaultId: string, sinceMs: number): Promise<VaultActivityDay[]> {
@@ -439,6 +634,17 @@ export class D1MetadataStore implements IMetadataStore {
     return res.results || [];
   }
 
+  async listActiveBlobHashes(vaultId: string): Promise<string[]> {
+    const res = await this.d1
+      .prepare(
+        'SELECT DISTINCT content_hash as hash FROM file_records WHERE vault_id = ? AND is_deleted = 0'
+      )
+      .bind(vaultId)
+      .all<{ hash: string }>();
+    return (res.results || []).map((r) => r.hash);
+  }
+
+  // Admin analytics
   async getAdminStats(): Promise<AdminStats> {
     const userRes = await this.d1.prepare('SELECT count(*) as c FROM users').first<{ c: number }>();
     const vaultRes = await this.d1.prepare('SELECT count(*) as c FROM vaults').first<{ c: number }>();
@@ -474,6 +680,56 @@ export class D1MetadataStore implements IMetadataStore {
     return res.results || [];
   }
 
+  async createDeletionJob(
+    resourceType: 'vault' | 'user',
+    resourceId: string,
+    ownerUserId?: string
+  ): Promise<DeletionJob> {
+    const jobId = crypto.randomUUID();
+    const now = Date.now();
+    await this.d1
+      .prepare(
+        'INSERT INTO deletion_jobs (job_id, resource_type, resource_id, owner_user_id, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)'
+      )
+      .bind(jobId, resourceType, resourceId, ownerUserId ?? null, 'pending', now, now)
+      .run();
+    return {
+      jobId,
+      resourceType,
+      resourceId,
+      ownerUserId: ownerUserId ?? null,
+      status: 'pending',
+      attempts: 0,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  async getDeletionJob(jobId: string): Promise<DeletionJob | null> {
+    const row = await this.d1
+      .prepare(
+        'SELECT job_id as jobId, resource_type as resourceType, resource_id as resourceId, owner_user_id as ownerUserId, status, attempts, last_error as lastError, created_at as createdAt, updated_at as updatedAt FROM deletion_jobs WHERE job_id = ?'
+      )
+      .bind(jobId)
+      .first<DeletionJob>();
+    return row || null;
+  }
+
+  async updateDeletionJob(
+    jobId: string,
+    status: DeletionJobStatus,
+    lastError?: string | null
+  ): Promise<DeletionJob | null> {
+    await this.d1
+      .prepare(
+        'UPDATE deletion_jobs SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ? WHERE job_id = ?'
+      )
+      .bind(status, lastError ?? null, Date.now(), jobId)
+      .run();
+    return this.getDeletionJob(jobId);
+  }
+
   async deleteUser(userId: string): Promise<void> {
     const vaultsRes = await this.d1
       .prepare('SELECT id FROM vaults WHERE user_id = ?')
@@ -484,9 +740,10 @@ export class D1MetadataStore implements IMetadataStore {
     for (const v of vaultsRes.results || []) {
       stmts.push(this.d1.prepare('DELETE FROM file_records WHERE vault_id = ?').bind(v.id));
       stmts.push(this.d1.prepare('DELETE FROM devices WHERE vault_id = ?').bind(v.id));
+      stmts.push(this.d1.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').bind(v.id));
     }
     stmts.push(this.d1.prepare('DELETE FROM vaults WHERE user_id = ?').bind(userId));
-    stmts.push(this.d1.prepare('DELETE FROM user_tokens WHERE user_id = ?').bind(userId));
+    stmts.push(this.d1.prepare('DELETE FROM auth_tokens WHERE user_id = ?').bind(userId));
     stmts.push(this.d1.prepare('DELETE FROM users WHERE id = ?').bind(userId));
 
     if (stmts.length > 0) {

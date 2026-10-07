@@ -147,6 +147,7 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 | `STORAGE_TYPE` | `local` | `local` or `s3` (S3 / MinIO / R2) |
 | `STORAGE_LOCAL_DIR` | `./data/blobs` | Blob root (one subfolder per vault) |
 | `S3_*` | — | Endpoint / bucket / keys when `STORAGE_TYPE=s3` |
+| `WS_TICKET_SECRET` | ephemeral | Signs short-lived WebSocket tickets; set it to keep tickets valid across restarts |
 
 ---
 
@@ -156,16 +157,29 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 GET    /api/v1/session                    # token handshake: vault, salt, device
 GET    /api/v1/sync/status                # latest version clock
 GET    /api/v1/sync/changes?since=N       # incremental change log
-POST   /api/v1/sync/commit                # push encrypted changes
+POST   /api/v1/sync/commit                # push encrypted changes (requestId => idempotent replay)
 POST   /api/v1/sync/blobs/check           # CAS dedup check
 PUT    /api/v1/sync/blobs/:hash           # upload ciphertext blob
 GET    /api/v1/sync/blobs/:hash           # download ciphertext blob
+POST   /api/v1/ws/ticket                  # exchange device token for a 60s single-use WS ticket
 GET    /api/v1/user/vaults/:id/activity   # 365-day heatmap data
-PATCH  /api/v1/user/tokens/:token         # rename device
-POST   /api/v1/user/tokens/:token/rotate  # rotate credential
+POST   /api/v1/user/vaults/:id/gc         # delete unreferenced blobs (optional { "graceDays": 7 })
+DELETE /api/v1/user/vaults/:id            # async deletion job (metadata first, blobs second)
+GET    /api/v1/user/deletion-jobs/:jobId  # deletion job status
+POST   /api/v1/user/deletion-jobs/:jobId/retry
+PATCH  /api/v1/user/tokens/:tokenId       # rename device
+POST   /api/v1/user/tokens/:tokenId/rotate  # rotate credential (old secret dies immediately)
+DELETE /api/v1/user/tokens/:tokenId       # revoke credential
 ```
 
 All sync endpoints are automatically scoped to the token's bound vault — cross-vault access is structurally impossible.
+
+**Realtime, per deployment**: the Node/Docker server supports WebSocket push — clients
+fetch a 60-second single-use ticket via `POST /api/v1/ws/ticket` and connect to
+`/api/v1/ws?ticket=…`; revoking a token closes its live sockets. The Cloudflare
+Worker deployment is REST + polling only (no cross-instance WebSocket fan-out);
+the ticket endpoint answers `501` there and the plugin automatically falls back
+to interval polling.
 
 ---
 
@@ -173,6 +187,8 @@ All sync endpoints are automatically scoped to the token's bound vault — cross
 
 - **Server knows**: ciphertext, opaque path ciphertext, HMAC hashes, vault version clock, device names
 - **Server never knows**: passphrase, encryption keys, plaintext content, plaintext file names
+- **Credentials at rest**: token secrets are stored server-side as SHA-256 hashes only (`auth_tokens`); the plaintext `ost_…` value is shown exactly once when created or rotated, and revocation/expiry (master 30d, device 180d) is enforced on every request
+- **Content integrity**: content hashes are client-side HMACs over plaintext (zero-knowledge), so the server cannot recompute them — clients verify `decrypt(blob)` hashes correctly before upload and after every download
 - **At rest on clients**: token + passphrase sealed via DPAPI / Keychain (desktop) or app-sandbox keys (mobile)
 - **Registration**: closed by default — the first account becomes admin; all later accounts are provisioned by an admin
 

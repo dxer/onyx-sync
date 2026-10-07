@@ -147,6 +147,7 @@ wrangler deploy
 | `STORAGE_TYPE` | `local` | `local` 或 `s3`（S3 / MinIO / R2） |
 | `STORAGE_LOCAL_DIR` | `./data/blobs` | 密文块根目录（每个仓库一个子目录） |
 | `S3_*` | — | `STORAGE_TYPE=s3` 时的端点 / 桶 / 密钥 |
+| `WS_TICKET_SECRET` | 临时随机 | 签发短期 WebSocket ticket 的密钥；设置后 ticket 可跨进程重启有效 |
 
 ---
 
@@ -156,16 +157,27 @@ wrangler deploy
 GET    /api/v1/session                    # 令牌握手：仓库、盐值、设备信息
 GET    /api/v1/sync/status                # 最新版本时钟
 GET    /api/v1/sync/changes?since=N       # 增量变更日志
-POST   /api/v1/sync/commit                # 推送加密变更
+POST   /api/v1/sync/commit                # 推送加密变更（带 requestId 即幂等可重放）
 POST   /api/v1/sync/blobs/check           # 内容寻址去重检查
 PUT    /api/v1/sync/blobs/:hash           # 上传密文块
 GET    /api/v1/sync/blobs/:hash           # 下载密文块
+POST   /api/v1/ws/ticket                  # 用设备令牌换取 60 秒一次性 WS ticket
 GET    /api/v1/user/vaults/:id/activity   # 365 天热力图数据
-PATCH  /api/v1/user/tokens/:token         # 设备重命名
-POST   /api/v1/user/tokens/:token/rotate  # 轮转凭据
+POST   /api/v1/user/vaults/:id/gc         # 回收无引用密文块（可选 { "graceDays": 7 }）
+DELETE /api/v1/user/vaults/:id            # 异步删除任务（先元数据后密文块）
+GET    /api/v1/user/deletion-jobs/:jobId  # 删除任务状态
+POST   /api/v1/user/deletion-jobs/:jobId/retry
+PATCH  /api/v1/user/tokens/:tokenId       # 设备重命名
+POST   /api/v1/user/tokens/:tokenId/rotate  # 轮转凭据（旧密钥立即失效）
+DELETE /api/v1/user/tokens/:tokenId       # 吊销凭据
 ```
 
 所有同步接口自动限定在令牌绑定的仓库范围内——跨仓库访问在结构上就不可能发生。
+
+**实时推送与部署形态**：Node/Docker 服务端支持 WebSocket 推送——客户端先通过
+`POST /api/v1/ws/ticket` 换取 60 秒一次性 ticket，再连接 `/api/v1/ws?ticket=…`；
+吊销令牌会主动断开其活动连接。Cloudflare Worker 部署只提供 REST + 轮询
+（不做跨实例 WebSocket 广播）；ticket 接口在 Worker 上返回 `501`，插件会自动回退到定时轮询。
 
 ---
 
@@ -173,6 +185,8 @@ POST   /api/v1/user/tokens/:token/rotate  # 轮转凭据
 
 - **服务端可见**：密文、不可读的路径密文、HMAC 哈希、仓库版本时钟、设备名称
 - **服务端永不可见**：主密码、加密密钥、明文内容、明文文件名
+- **凭据静态存储**：令牌密钥在服务端只保存 SHA-256 哈希（`auth_tokens` 表）；`ost_…` 明文仅在创建 / 轮转时展示一次；吊销与过期（master 30 天 / device 180 天）在每次请求时强制校验
+- **内容完整性**：内容哈希是对明文的客户端 HMAC（零知识设计），服务端无法重算——客户端在上传前验证 `解密(密文)` 哈希一致、每次下载后再验一次
 - **客户端静态存储**：令牌与主密码经 DPAPI / Keychain（桌面端）或应用沙盒密钥（移动端）密封
 - **注册机制**：默认关闭公开注册——首个账户自动成为管理员；后续账户全部由管理员开通
 

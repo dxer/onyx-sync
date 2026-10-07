@@ -1,4 +1,6 @@
-import type { IBlobStore } from './types';
+import type { IBlobStore, BlobListPage } from './types';
+import { assertHash } from '../request-validation';
+import { isValidBlobFileName, normalizeBlobHash } from './blob-utils';
 
 export class R2BlobStore implements IBlobStore {
   private bucket: R2Bucket;
@@ -13,8 +15,7 @@ export class R2BlobStore implements IBlobStore {
 
   private getKey(vaultId: string, hash: string): string {
     const safeVault = this.sanitize(vaultId);
-    const safeHash = hash.replace(/[^a-f0-9]/gi, '');
-    return `${safeVault}/${safeHash}`;
+    return `${safeVault}/${normalizeBlobHash(hash)}`;
   }
 
   async put(vaultId: string, hash: string, data: Uint8Array): Promise<void> {
@@ -59,9 +60,36 @@ export class R2BlobStore implements IBlobStore {
 
   async deleteVault(vaultId: string): Promise<void> {
     const safeVault = this.sanitize(vaultId);
-    const listed = await this.bucket.list({ prefix: `${safeVault}/` });
-    for (const obj of listed.objects) {
-      await this.bucket.delete(obj.key);
-    }
+    let cursor: string | undefined;
+
+    do {
+      const listed = await this.bucket.list({ prefix: `${safeVault}/`, cursor });
+      const keys = listed.objects.map((obj) => obj.key);
+      await Promise.all(keys.map((key) => this.bucket.delete(key)));
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  }
+
+  async list(vaultId: string, cursor?: string): Promise<BlobListPage> {
+    const safeVault = this.sanitize(vaultId);
+    const prefix = `${safeVault}/`;
+    const listed = await this.bucket.list({ prefix, cursor });
+
+    const blobs = listed.objects
+      .map((obj) => ({
+        hash: obj.key.slice(prefix.length),
+        lastModified: obj.uploaded ? new Date(obj.uploaded).getTime() : null
+      }))
+      .filter((entry) => isValidBlobFileName(entry.hash));
+
+    return {
+      blobs,
+      nextCursor: listed.truncated ? listed.cursor : undefined
+    };
+  }
+
+  async deleteBlob(vaultId: string, hash: string): Promise<void> {
+    assertHash(hash);
+    await this.bucket.delete(this.getKey(vaultId, hash));
   }
 }

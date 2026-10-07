@@ -2,11 +2,13 @@ import { serve } from '@hono/node-server';
 import { WebSocketServer, WebSocket } from 'ws';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createApp } from './app';
 import { SqliteMetadataStore } from './storage/sqlite';
 import { LocalFsBlobStore } from './storage/fs-blob';
 import { S3BlobStore } from './storage/s3-blob';
 import type { IMetadataStore, INotifier } from './storage/types';
+import { verifyWsTicket } from './ws-tickets';
 import { hashPassword, newSalt } from './auth-utils';
 
 // Load .env configuration
@@ -60,6 +62,17 @@ const PORT = Number(process.env.PORT) || 8080;
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), 'data', 'sync.db');
 const STORAGE_TYPE = process.env.STORAGE_TYPE || 'local';
 const LOCAL_DIR = process.env.STORAGE_LOCAL_DIR || join(process.cwd(), 'data', 'blobs');
+const MAX_BLOB_BYTES = Number(process.env.MAX_BLOB_BYTES) || undefined;
+const MAX_COMMIT_CHANGES = Number(process.env.MAX_COMMIT_CHANGES) || undefined;
+const MAX_BLOB_CHECKS = Number(process.env.MAX_BLOB_CHECKS) || undefined;
+
+// Secret used to sign short-lived WebSocket tickets. An ephemeral fallback keeps
+// single-process deployments working; set WS_TICKET_SECRET to keep tickets valid
+// across restarts.
+const WS_TICKET_SECRET = process.env.WS_TICKET_SECRET || randomBytes(32).toString('hex');
+if (!process.env.WS_TICKET_SECRET) {
+  console.warn('[Config] WS_TICKET_SECRET not set; using an ephemeral secret (outstanding tickets die on restart).');
+}
 
 // 1. Initialize SQLite Metadata Store
 const metadata = new SqliteMetadataStore(DB_PATH);
@@ -85,9 +98,20 @@ if (STORAGE_TYPE === 's3') {
 interface ConnectedClient {
   ws: WebSocket;
   vaultId: string;
+  tokenId: string;
+  deviceName: string;
 }
 
 const clients = new Set<ConnectedClient>();
+
+// Single-use enforcement for WebSocket tickets (stateless signature + local replay cache)
+const usedTickets = new Map<string, number>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [jti, expiresAt] of usedTickets) {
+    if (expiresAt < now) usedTickets.delete(jti);
+  }
+}, 60_000).unref();
 
 const notifier: INotifier = {
   notifyChange(vaultId: string, version: number) {
@@ -110,7 +134,11 @@ const notifier: INotifier = {
 const app = createApp({
   metadata,
   blobs,
-  notifier
+  notifier,
+  maxBlobBytes: MAX_BLOB_BYTES,
+  maxCommitChanges: MAX_COMMIT_CHANGES,
+  maxBlobChecks: MAX_BLOB_CHECKS,
+  wsTicketSecret: WS_TICKET_SECRET
 });
 
 // Helper: Ensure administrator account matches .env configuration
@@ -161,21 +189,43 @@ async function bootstrap() {
 
   wss.on('connection', async (ws, req) => {
     const url = new URL(req.url || '', `http://localhost:${PORT}`);
-    const token = url.searchParams.get('token');
+    const ticket = url.searchParams.get('ticket');
 
-    if (!token) {
-      ws.close(4001, 'Unauthorized: Missing token');
+    if (!ticket) {
+      ws.close(4001, 'Unauthorized: Missing ticket');
       return;
     }
 
-    const session = await metadata.verifyToken(token);
-    if (!session) {
-      ws.close(4001, 'Unauthorized: Invalid token');
+    const payload = await verifyWsTicket(WS_TICKET_SECRET, ticket);
+    if (!payload) {
+      ws.close(4001, 'Unauthorized: Invalid or expired ticket');
+      return;
+    }
+    if (usedTickets.has(payload.jti)) {
+      ws.close(4001, 'Unauthorized: Ticket already used');
+      return;
+    }
+    usedTickets.set(payload.jti, payload.exp);
+
+    // Re-check the underlying credential: revocation must survive ticket minting.
+    if (!(await metadata.isTokenActive(payload.tokenId))) {
+      ws.close(4001, 'Unauthorized: Token revoked or expired');
       return;
     }
 
-    const vaultId = session.vault.id;
-    const client: ConnectedClient = { ws, vaultId };
+    const vault = await metadata.getVault(payload.vaultId);
+    if (!vault) {
+      ws.close(4001, 'Unauthorized: Vault no longer exists');
+      return;
+    }
+
+    const tokenInfo = await metadata.getTokenById(payload.tokenId);
+    const client: ConnectedClient = {
+      ws,
+      vaultId: payload.vaultId,
+      tokenId: payload.tokenId,
+      deviceName: tokenInfo?.deviceName || 'Device'
+    };
     clients.add(client);
 
     ws.on('close', () => {
@@ -186,11 +236,25 @@ async function bootstrap() {
       clients.delete(client);
     });
 
-    ws.send(JSON.stringify({ event: 'connected', vaultId, deviceName: session.tokenInfo.deviceName }));
+    ws.send(JSON.stringify({ event: 'connected', vaultId: client.vaultId, deviceName: client.deviceName }));
   });
 
+  // Revoke/expiry enforcement for live sockets
+  setInterval(async () => {
+    for (const client of clients) {
+      try {
+        if (!(await metadata.isTokenActive(client.tokenId))) {
+          client.ws.close(4004, 'Token revoked or expired');
+          clients.delete(client);
+        }
+      } catch {
+        // keep the socket on transient storage errors
+      }
+    }
+  }, 60_000).unref();
+
   console.log(`🚀 Onyx Sync Server started on http://0.0.0.0:${PORT}`);
-  console.log(`🔌 WebSocket real-time endpoint available at ws://0.0.0.0:${PORT}/api/v1/ws`);
+  console.log('🔌 WebSocket real-time endpoint at /api/v1/ws (short-lived ticket auth via POST /api/v1/ws/ticket)');
 }
 
 bootstrap().catch((err) => {

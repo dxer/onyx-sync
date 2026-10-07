@@ -22,6 +22,26 @@ export interface TokenValidationResult {
   vault: Vault;
 }
 
+export type DeletionJobStatus = 'pending' | 'completed' | 'failed';
+
+export interface DeletionJob {
+  jobId: string;
+  resourceType: 'vault' | 'user';
+  resourceId: string;
+  ownerUserId: string | null;
+  status: DeletionJobStatus;
+  attempts: number;
+  lastError?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateTokenOptions {
+  tokenType?: 'master' | 'device';
+  /** Overrides the default lifetime (master 30d / device 180d). Negative values create already-expired tokens (tests). */
+  expiresInDays?: number;
+}
+
 export interface IMetadataStore {
   init(): Promise<void>;
 
@@ -31,14 +51,15 @@ export interface IMetadataStore {
   getUserById(id: string): Promise<User | null>;
   updateUserPassword(id: string, passwordHash: string, salt: string, role?: 'admin' | 'user'): Promise<void>;
 
-  // Token management
-  createToken(userId: string, vaultId: string, deviceName: string): Promise<string>;
+  // Token management (secrets are stored hash-only; plaintext is returned exactly once at creation)
+  createToken(userId: string, vaultId: string, deviceName: string, options?: CreateTokenOptions): Promise<string>;
   verifyToken(token: string): Promise<TokenValidationResult | null>;
   verifyUserMasterToken(token: string): Promise<User | null>;
-  getToken(token: string): Promise<UserToken | null>;
-  updateToken(token: string, deviceName: string): Promise<void>;
-  rotateToken(token: string): Promise<string | null>;
-  deleteToken(token: string): Promise<void>;
+  getTokenById(tokenId: string): Promise<UserToken | null>;
+  isTokenActive(tokenId: string): Promise<boolean>;
+  updateToken(tokenId: string, deviceName: string): Promise<void>;
+  rotateToken(tokenId: string): Promise<string | null>;
+  deleteToken(tokenId: string): Promise<void>;
   listUserTokens(userId: string): Promise<UserToken[]>;
   listVaultTokens(vaultId: string): Promise<UserToken[]>;
 
@@ -48,13 +69,37 @@ export interface IMetadataStore {
   listUserVaults(userId: string): Promise<VaultSummary[]>;
   deleteVault(vaultId: string): Promise<void>;
   getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]>;
-  commitChanges(vaultId: string, deviceId: string, changes: CommitChangeItem[]): Promise<CommitResult>;
+  commitChanges(
+    vaultId: string,
+    deviceId: string,
+    changes: CommitChangeItem[],
+    requestId?: string
+  ): Promise<CommitResult>;
   getVaultActivity(vaultId: string, sinceMs: number): Promise<VaultActivityDay[]>;
+  /** Content hashes referenced by live (non-tombstoned) records — the GC keep-set. */
+  listActiveBlobHashes(vaultId: string): Promise<string[]>;
 
   // Admin management
   getAdminStats(): Promise<AdminStats>;
   listAllUsers(): Promise<AdminUserInfo[]>;
   deleteUser(userId: string): Promise<void>;
+  createDeletionJob(
+    resourceType: 'vault' | 'user',
+    resourceId: string,
+    ownerUserId?: string
+  ): Promise<DeletionJob>;
+  getDeletionJob(jobId: string): Promise<DeletionJob | null>;
+  updateDeletionJob(jobId: string, status: DeletionJobStatus, lastError?: string | null): Promise<DeletionJob | null>;
+}
+
+export interface BlobListEntry {
+  hash: string;
+  lastModified: number | null;
+}
+
+export interface BlobListPage {
+  blobs: BlobListEntry[];
+  nextCursor?: string;
 }
 
 export interface IBlobStore {
@@ -63,6 +108,10 @@ export interface IBlobStore {
   has(vaultId: string, hash: string): Promise<boolean>;
   checkHashes(vaultId: string, hashes: string[]): Promise<{ existingHashes: string[]; missingHashes: string[] }>;
   deleteVault(vaultId: string): Promise<void>;
+  /** Lists stored blob hashes page by page (GC support). */
+  list(vaultId: string, cursor?: string): Promise<BlobListPage>;
+  /** Deletes a single blob; missing blobs are treated as success. */
+  deleteBlob(vaultId: string, hash: string): Promise<void>;
 }
 
 export interface INotifier {

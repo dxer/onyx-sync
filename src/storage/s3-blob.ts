@@ -3,10 +3,13 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command
 } from '@aws-sdk/client-s3';
-import type { IBlobStore } from './types';
+import type { IBlobStore, BlobListPage } from './types';
+import { assertHash } from '../request-validation';
+import { isValidBlobFileName, normalizeBlobHash } from './blob-utils';
 
 export interface S3Config {
   endpoint?: string;
@@ -43,8 +46,7 @@ export class S3BlobStore implements IBlobStore {
 
   private getKey(vaultId: string, hash: string): string {
     const safeVault = this.sanitize(vaultId);
-    const safeHash = hash.replace(/[^a-f0-9]/gi, '');
-    return `${this.prefix}${safeVault}/${safeHash}`;
+    return `${this.prefix}${safeVault}/${normalizeBlobHash(hash)}`;
   }
 
   async put(vaultId: string, hash: string, data: Uint8Array): Promise<void> {
@@ -66,8 +68,11 @@ export class S3BlobStore implements IBlobStore {
       const response = await this.client.send(command);
       if (!response.Body) return null;
       return await response.Body.transformToByteArray();
-    } catch {
-      return null;
+    } catch (error: any) {
+      if (error?.name === 'NoSuchKey' || error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) {
+        return null;
+      }
+      throw error;
     }
   }
 
@@ -79,8 +84,9 @@ export class S3BlobStore implements IBlobStore {
       });
       await this.client.send(command);
       return true;
-    } catch {
-      return false;
+    } catch (error: any) {
+      if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
+      throw error;
     }
   }
 
@@ -104,21 +110,61 @@ export class S3BlobStore implements IBlobStore {
   async deleteVault(vaultId: string): Promise<void> {
     const safeVault = this.sanitize(vaultId);
     const prefix = `${this.prefix}${safeVault}/`;
+    let continuationToken: string | undefined;
 
-    const listCmd = new ListObjectsV2Command({
-      Bucket: this.bucket,
-      Prefix: prefix
-    });
-    const listResp = await this.client.send(listCmd);
-
-    if (listResp.Contents && listResp.Contents.length > 0) {
-      const deleteCmd = new DeleteObjectsCommand({
+    do {
+      const listResp = await this.client.send(new ListObjectsV2Command({
         Bucket: this.bucket,
-        Delete: {
-          Objects: listResp.Contents.map((c) => ({ Key: c.Key }))
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      }));
+      const keys = (listResp.Contents || [])
+        .map((object) => object.Key)
+        .filter((key): key is string => Boolean(key));
+
+      for (let index = 0; index < keys.length; index += 1000) {
+        const batch = keys.slice(index, index + 1000);
+        if (batch.length === 0) continue;
+        const result = await this.client.send(new DeleteObjectsCommand({
+          Bucket: this.bucket,
+          Delete: { Objects: batch.map((Key) => ({ Key })) }
+        }));
+        if (result.Errors && result.Errors.length > 0) {
+          throw new Error(`Failed to delete ${result.Errors.length} blob objects`);
         }
-      });
-      await this.client.send(deleteCmd);
-    }
+      }
+
+      continuationToken = listResp.IsTruncated ? listResp.NextContinuationToken : undefined;
+    } while (continuationToken);
+  }
+
+  async list(vaultId: string, cursor?: string): Promise<BlobListPage> {
+    const safeVault = this.sanitize(vaultId);
+    const prefix = `${this.prefix}${safeVault}/`;
+    const listResp = await this.client.send(new ListObjectsV2Command({
+      Bucket: this.bucket,
+      Prefix: prefix,
+      ContinuationToken: cursor || undefined
+    }));
+
+    const blobs = (listResp.Contents || [])
+      .map((object) => ({
+        hash: (object.Key || '').slice(prefix.length),
+        lastModified: object.LastModified ? object.LastModified.getTime() : null
+      }))
+      .filter((entry) => isValidBlobFileName(entry.hash));
+
+    return {
+      blobs,
+      nextCursor: listResp.IsTruncated ? listResp.NextContinuationToken : undefined
+    };
+  }
+
+  async deleteBlob(vaultId: string, hash: string): Promise<void> {
+    assertHash(hash);
+    await this.client.send(new DeleteObjectCommand({
+      Bucket: this.bucket,
+      Key: this.getKey(vaultId, hash)
+    }));
   }
 }

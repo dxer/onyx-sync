@@ -32,6 +32,8 @@ const en = {
   conflictCopyOption: 'Create Conflict Copy',
   autoSyncName: 'Automatic Synchronization',
   autoSyncDesc: 'Synchronize on file modification, window focus, and background interval',
+  syncIntervalName: 'Background Sync Interval (seconds)',
+  syncIntervalDesc: 'How often to poll the server when no changes are detected (0 disables interval sync)',
 
   // Actions
   actionsHeader: 'Connection & Operations',
@@ -75,6 +77,8 @@ const zh: typeof en = {
   conflictCopyOption: '生成冲突副本文件',
   autoSyncName: '后台自动同步',
   autoSyncDesc: '笔记保存、窗口聚焦及定时在后台自动执行静默增量同步',
+  syncIntervalName: '后台同步间隔 (秒)',
+  syncIntervalDesc: '无变更时轮询服务端的间隔（设为 0 关闭定时轮询，仅保留事件触发同步）',
 
   // Actions
   actionsHeader: '连接与操作',

@@ -10,10 +10,14 @@ export interface User {
 }
 
 export interface UserToken {
-  token: string;
+  /** Stable server-side identifier for the credential (the secret itself is only shown once at creation). */
+  tokenId: string;
   userId: string;
   vaultId: string;
   deviceName: string;
+  tokenType?: string;
+  expiresAt?: number | null;
+  revokedAt?: number | null;
   createdAt: number;
   lastUsedAt: number;
 }
@@ -111,6 +115,7 @@ export interface Device {
 }
 
 export interface FileRecord {
+  /** Stable opaque file identity. It survives path changes and content updates. */
   id: string;
   vaultId: string;
   encryptedPath: string; // Base64url encoded ciphertext of relative path
@@ -123,6 +128,7 @@ export interface FileRecord {
 }
 
 export interface FileChange {
+  /** Stable opaque file identity. It survives path changes and content updates. */
   id: string;
   encryptedPath: string;
   contentHash: string;
@@ -133,7 +139,8 @@ export interface FileChange {
 }
 
 export interface CommitChangeItem {
-  id?: string; // Optional if new file
+  /** Stable opaque file identity; omitted only for legacy/new-file submissions. */
+  id?: string;
   encryptedPath: string;
   contentHash: string;
   size: number;
@@ -142,6 +149,8 @@ export interface CommitChangeItem {
 }
 
 export interface CommitPayload {
+  /** Client-generated stable id used to make retries idempotent. */
+  requestId?: string;
   changes: CommitChangeItem[];
 }
 
@@ -149,6 +158,10 @@ export interface CommitResult {
   success: boolean;
   newVersion: number;
   committedCount: number;
+  requestId?: string;
+  replayed?: boolean;
+  /** Final server identities, in the same order as the submitted changes. */
+  changes?: Array<{ id: string; encryptedPath: string }>;
 }
 
 export interface SyncStatusResponse {
@@ -172,6 +185,8 @@ export interface BlobCheckResponse {
 
 export interface ClientFileMeta {
   path: string; // Plaintext local path
+  /** Server-assigned stable identity; absent on legacy local records. */
+  id?: string;
   encryptedPath: string; // Ciphertext path
   localHash: string; // Local content HMAC hash
   baseHash?: string; // Content hash of the last successfully synced base version

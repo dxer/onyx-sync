@@ -59,6 +59,7 @@ COPY --from=builder /app/dist/node dist/node
 
 EXPOSE 8080
 VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- http://127.0.0.1:8080/api/v1/readyz || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/node/entry-node.js"]

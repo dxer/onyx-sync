@@ -70,12 +70,12 @@ export class SyncApiClient {
     return res.json;
   }
 
-  async commit(changes: CommitChangeItem[]): Promise<CommitResult> {
+  async commit(changes: CommitChangeItem[], requestId?: string): Promise<CommitResult> {
     const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/commit`,
       method: 'POST',
       headers: this.getHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ changes })
+      body: JSON.stringify({ requestId, changes })
     });
     return res.json;
   }
@@ -95,7 +95,7 @@ export class SyncApiClient {
       url: `${this.baseUrl}/api/v1/sync/blobs/${hash}`,
       method: 'PUT',
       headers: this.getHeaders({ 'Content-Type': 'application/octet-stream' }),
-      body: data.buffer as ArrayBuffer
+      body: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
     });
   }
 
@@ -106,5 +106,19 @@ export class SyncApiClient {
       headers: this.getHeaders()
     });
     return new Uint8Array(res.arrayBuffer);
+  }
+
+  // Exchanges the device token for a short-lived single-use WebSocket ticket.
+  // Throws on deployments without WebSocket support (e.g. Cloudflare Worker).
+  async createWsTicket(): Promise<{ ticket: string; expiresIn: number }> {
+    const res = await requestUrl({
+      url: `${this.baseUrl}/api/v1/ws/ticket`,
+      method: 'POST',
+      headers: this.getHeaders()
+    });
+    if (res.status !== 200) {
+      throw new Error(`WebSocket ticket request failed: ${res.status}`);
+    }
+    return res.json;
   }
 }

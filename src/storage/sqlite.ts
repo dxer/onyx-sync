@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
@@ -14,8 +14,28 @@ import type {
   CommitResult,
   VaultActivityDay
 } from '@onyx/shared';
-import type { IMetadataStore, UserWithSecret, TokenValidationResult } from './types';
-import { TABLES_SQL, INDEXES_SQL } from './sqlite-common';
+import type {
+  CreateTokenOptions,
+  DeletionJob,
+  DeletionJobStatus,
+  IMetadataStore,
+  UserWithSecret,
+  TokenValidationResult
+} from './types';
+import { StorageConflictError, StorageNotFoundError } from './errors';
+import { newTokenSecret, tokenExpiry } from './token-utils';
+import {
+  AUTH_TOKEN_SELECT,
+  INDEXES_SQL,
+  MASTER_TOKEN_SQL,
+  TABLES_SQL,
+  TOKEN_SESSION_SQL,
+  canonicalCommitPayload
+} from './sqlite-common';
+
+export function hashTokenSecret(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
 
 export class SqliteMetadataStore implements IMetadataStore {
   private db: Database.Database;
@@ -41,13 +61,11 @@ export class SqliteMetadataStore implements IMetadataStore {
       if (!vaultCols.includes('user_id')) {
         this.db.exec('ALTER TABLE vaults ADD COLUMN user_id TEXT DEFAULT ""');
       }
-      const tokenCols = this.db.prepare('PRAGMA table_info(user_tokens)').all().map((c: any) => c.name);
-      if (!tokenCols.includes('vault_id')) {
-        this.db.exec('ALTER TABLE user_tokens ADD COLUMN vault_id TEXT DEFAULT ""');
-      }
     } catch {
       // ignore
     }
+
+    this.migrateLegacyUserTokens();
 
     // Safely create indexes after columns exist
     try {
@@ -57,8 +75,89 @@ export class SqliteMetadataStore implements IMetadataStore {
     }
   }
 
+  /** Upgrades the legacy plaintext user_tokens table into hash-only auth_tokens, then drops it. */
+  private migrateLegacyUserTokens(): void {
+    const exists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='user_tokens'")
+      .get();
+    if (!exists) return;
+
+    // Legacy databases may predate the lifecycle columns; select only what exists.
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(user_tokens)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!columns.has('token')) return;
+    const wanted = [
+      'token',
+      'user_id',
+      'vault_id',
+      'device_name',
+      'token_type',
+      'expires_at',
+      'revoked_at',
+      'revoked_reason',
+      'created_at',
+      'last_used_at'
+    ];
+    const selectList = wanted.filter((column) => columns.has(column)).join(', ');
+
+    const rows = this.db
+      .prepare(`SELECT ${selectList} FROM user_tokens`)
+      .all() as Array<{
+      token: string | null;
+      user_id: string;
+      vault_id?: string | null;
+      device_name: string;
+      token_type?: string | null;
+      expires_at?: number | null;
+      revoked_at?: number | null;
+      revoked_reason?: string | null;
+      created_at?: number | null;
+      last_used_at?: number | null;
+    }>;
+
+    const migrate = this.db.transaction(() => {
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO auth_tokens (token_id, user_id, vault_id, device_name, token_hash, token_type, expires_at, revoked_at, revoked_reason, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+      for (const row of rows) {
+        if (!row.token) continue;
+        const tokenType = row.token_type === 'master' || row.token_type === 'device'
+          ? row.token_type
+          : row.vault_id
+            ? 'device'
+            : 'master';
+        // Legacy rows either had no expiry column or a placeholder value; only a
+        // genuinely future expiry is kept, otherwise the token gets a fresh window.
+        const legacyExpiry = row.expires_at ?? null;
+        const expiresAt = legacyExpiry !== null && legacyExpiry > Date.now()
+          ? legacyExpiry
+          : tokenExpiry(tokenType);
+        insert.run(
+          randomUUID(),
+          row.user_id,
+          row.vault_id || '',
+          row.device_name || 'Device',
+          hashTokenSecret(row.token),
+          tokenType,
+          expiresAt,
+          row.revoked_at ?? null,
+          row.revoked_reason ?? null,
+          row.created_at ?? Date.now(),
+          row.last_used_at ?? Date.now()
+        );
+      }
+      this.db.exec('DROP TABLE user_tokens');
+    });
+    migrate();
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  private getCommitPayloadHash(changes: CommitChangeItem[]): string {
+    return createHash('sha256').update(canonicalCommitPayload(changes)).digest('hex');
   }
 
   // User management
@@ -114,36 +213,32 @@ export class SqliteMetadataStore implements IMetadataStore {
     }
   }
 
-  // Token management
-  async createToken(userId: string, vaultId: string, deviceName: string): Promise<string> {
-    const token = `ost_${randomUUID().replace(/-/g, '')}${randomUUID().replace(/-/g, '')}`;
+  // Token management (hash-only storage)
+  async createToken(
+    userId: string,
+    vaultId: string,
+    deviceName: string,
+    options?: CreateTokenOptions
+  ): Promise<string> {
+    const token = newTokenSecret();
+    const tokenType = options?.tokenType || (vaultId ? 'device' : 'master');
     const now = Date.now();
     this.db
       .prepare(
-        'INSERT INTO user_tokens (token, user_id, vault_id, device_name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)'
+        'INSERT INTO auth_tokens (token_id, user_id, vault_id, device_name, token_hash, token_type, expires_at, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .run(token, userId, vaultId, deviceName, now, now);
+      .run(randomUUID(), userId, vaultId, deviceName, hashTokenSecret(token), tokenType, tokenExpiry(tokenType, options), now, now);
 
     return token;
   }
 
   async verifyToken(token: string): Promise<TokenValidationResult | null> {
-    const row = this.db
-      .prepare(
-        `SELECT u.id as u_id, u.username as u_username, u.role as u_role, u.created_at as u_created_at,
-                t.token, t.user_id as t_user_id, t.vault_id as t_vault_id, t.device_name as t_device_name, t.created_at as t_created_at, t.last_used_at as t_last_used_at,
-                v.id as v_id, v.user_id as v_user_id, v.name as v_name, v.salt as v_salt, v.latest_version as v_latest_version, v.created_at as v_created_at
-         FROM user_tokens t
-         JOIN users u ON t.user_id = u.id
-         LEFT JOIN vaults v ON t.vault_id = v.id
-         WHERE t.token = ?`
-      )
-      .get(token) as any;
+    const row = this.db.prepare(TOKEN_SESSION_SQL).get(hashTokenSecret(token), Date.now()) as any;
 
     if (row && row.v_id) {
       this.db
-        .prepare('UPDATE user_tokens SET last_used_at = ? WHERE token = ?')
-        .run(Date.now(), token);
+        .prepare('UPDATE auth_tokens SET last_used_at = ? WHERE token_id = ?')
+        .run(Date.now(), row.t_token_id);
 
       return {
         user: {
@@ -153,10 +248,12 @@ export class SqliteMetadataStore implements IMetadataStore {
           createdAt: row.u_created_at
         },
         tokenInfo: {
-          token: row.token,
+          tokenId: row.t_token_id,
           userId: row.t_user_id,
           vaultId: row.t_vault_id,
           deviceName: row.t_device_name,
+          tokenType: row.t_token_type,
+          expiresAt: row.t_expires_at,
           createdAt: row.t_created_at,
           lastUsedAt: Date.now()
         },
@@ -176,67 +273,64 @@ export class SqliteMetadataStore implements IMetadataStore {
 
   async verifyUserMasterToken(token: string): Promise<User | null> {
     const row = this.db
-      .prepare(
-        `SELECT u.id, u.username, u.role, u.created_at as createdAt 
-         FROM user_tokens t 
-         JOIN users u ON t.user_id = u.id 
-         WHERE t.token = ?`
-      )
-      .get(token) as User | undefined;
+      .prepare(MASTER_TOKEN_SQL)
+      .get(hashTokenSecret(token), Date.now()) as User | undefined;
 
     if (row) {
       this.db
-        .prepare('UPDATE user_tokens SET last_used_at = ? WHERE token = ?')
-        .run(Date.now(), token);
+        .prepare('UPDATE auth_tokens SET last_used_at = ? WHERE token_hash = ?')
+        .run(Date.now(), hashTokenSecret(token));
       return row;
     }
 
     return null;
   }
 
-  async getToken(token: string): Promise<UserToken | null> {
+  async getTokenById(tokenId: string): Promise<UserToken | null> {
     const row = this.db
-      .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens WHERE token = ?`
-      )
-      .get(token) as UserToken | undefined;
+      .prepare(`SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE token_id = ?`)
+      .get(tokenId) as UserToken | undefined;
     return row || null;
   }
 
-  async updateToken(token: string, deviceName: string): Promise<void> {
-    this.db.prepare('UPDATE user_tokens SET device_name = ? WHERE token = ?').run(deviceName, token);
+  async isTokenActive(tokenId: string): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        'SELECT 1 as active FROM auth_tokens WHERE token_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)'
+      )
+      .get(tokenId, Date.now()) as { active: number } | undefined;
+    return Boolean(row);
   }
 
-  async rotateToken(oldToken: string): Promise<string | null> {
-    const existing = await this.getToken(oldToken);
+  async updateToken(tokenId: string, deviceName: string): Promise<void> {
+    this.db.prepare('UPDATE auth_tokens SET device_name = ? WHERE token_id = ?').run(deviceName, tokenId);
+  }
+
+  async rotateToken(tokenId: string): Promise<string | null> {
+    const existing = await this.getTokenById(tokenId);
     if (!existing) return null;
 
-    const newToken = `ost_${randomUUID().replace(/-/g, '')}${randomUUID().replace(/-/g, '')}`;
+    const tokenType = existing.tokenType === 'master' ? 'master' : 'device';
+    const newToken = newTokenSecret();
     const now = Date.now();
-    const tx = this.db.transaction(() => {
-      this.db.prepare('DELETE FROM user_tokens WHERE token = ?').run(oldToken);
-      this.db
-        .prepare(
-          'INSERT INTO user_tokens (token, user_id, vault_id, device_name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)'
-        )
-        .run(newToken, existing.userId, existing.vaultId, existing.deviceName, now, now);
-    });
-    tx();
+    this.db
+      .prepare(
+        'UPDATE auth_tokens SET token_hash = ?, expires_at = ?, revoked_at = NULL, revoked_reason = NULL, created_at = ?, last_used_at = ? WHERE token_id = ?'
+      )
+      .run(hashTokenSecret(newToken), tokenExpiry(tokenType), now, now, tokenId);
     return newToken;
   }
 
-  async deleteToken(token: string): Promise<void> {
-    this.db.prepare('DELETE FROM user_tokens WHERE token = ?').run(token);
+  async deleteToken(tokenId: string): Promise<void> {
+    this.db
+      .prepare('UPDATE auth_tokens SET revoked_at = ?, revoked_reason = ? WHERE token_id = ?')
+      .run(Date.now(), 'user_requested', tokenId);
   }
 
   async listUserTokens(userId: string): Promise<UserToken[]> {
     const rows = this.db
       .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens 
-         WHERE user_id = ? 
-         ORDER BY last_used_at DESC`
+        `SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE user_id = ? ORDER BY last_used_at DESC`
       )
       .all(userId) as UserToken[];
 
@@ -246,10 +340,7 @@ export class SqliteMetadataStore implements IMetadataStore {
   async listVaultTokens(vaultId: string): Promise<UserToken[]> {
     const rows = this.db
       .prepare(
-        `SELECT token, user_id as userId, vault_id as vaultId, device_name as deviceName, created_at as createdAt, last_used_at as lastUsedAt 
-         FROM user_tokens 
-         WHERE vault_id = ? 
-         ORDER BY last_used_at DESC`
+        `SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE vault_id = ? ORDER BY last_used_at DESC`
       )
       .all(vaultId) as UserToken[];
 
@@ -310,7 +401,8 @@ export class SqliteMetadataStore implements IMetadataStore {
     const tx = this.db.transaction(() => {
       this.db.prepare('DELETE FROM file_records WHERE vault_id = ?').run(vaultId);
       this.db.prepare('DELETE FROM devices WHERE vault_id = ?').run(vaultId);
-      this.db.prepare('DELETE FROM user_tokens WHERE vault_id = ?').run(vaultId);
+      this.db.prepare('DELETE FROM auth_tokens WHERE vault_id = ?').run(vaultId);
+      this.db.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').run(vaultId);
       this.db.prepare('DELETE FROM vaults WHERE id = ?').run(vaultId);
     });
     tx();
@@ -319,20 +411,20 @@ export class SqliteMetadataStore implements IMetadataStore {
   async getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]> {
     const rows = this.db
       .prepare(
-        `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime 
-         FROM file_records 
-         WHERE vault_id = ? AND version > ? 
+        `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime
+         FROM file_records
+         WHERE vault_id = ? AND version > ?
          ORDER BY version ASC`
       )
       .all(vaultId, sinceVersion) as Array<{
-        id: string;
-        encryptedPath: string;
-        contentHash: string;
-        size: number;
-        version: number;
-        isDeleted: number;
-        mtime: number;
-      }>;
+      id: string;
+      encryptedPath: string;
+      contentHash: string;
+      size: number;
+      version: number;
+      isDeleted: number;
+      mtime: number;
+    }>;
 
     return rows.map((r) => ({
       id: r.id,
@@ -348,15 +440,38 @@ export class SqliteMetadataStore implements IMetadataStore {
   async commitChanges(
     vaultId: string,
     deviceId: string,
-    changes: CommitChangeItem[]
+    changes: CommitChangeItem[],
+    requestId?: string
   ): Promise<CommitResult> {
     const transaction = this.db.transaction(() => {
+      if (requestId) {
+        const receipt = this.db.prepare(
+          'SELECT payload_hash as payloadHash, new_version as newVersion, committed_count as committedCount, changes_json as changesJson FROM commit_receipts WHERE vault_id = ? AND request_id = ?'
+        ).get(vaultId, requestId) as
+          | { payloadHash: string; newVersion: number; committedCount: number; changesJson: string }
+          | undefined;
+        if (receipt) {
+          const payloadHash = this.getCommitPayloadHash(changes);
+          if (receipt.payloadHash !== payloadHash) {
+            throw new StorageConflictError('request-id-reuse', 'request-id-reuse');
+          }
+          return {
+            success: true,
+            newVersion: receipt.newVersion,
+            committedCount: receipt.committedCount,
+            requestId,
+            replayed: true,
+            changes: JSON.parse(receipt.changesJson)
+          };
+        }
+      }
+
       const vault = this.db
         .prepare('SELECT latest_version FROM vaults WHERE id = ?')
         .get(vaultId) as { latest_version: number } | undefined;
 
       if (!vault) {
-        throw new Error(`Vault ${vaultId} not found`);
+        throw new StorageNotFoundError(`Vault ${vaultId} not found`);
       }
 
       const newVersion = vault.latest_version + 1;
@@ -365,25 +480,46 @@ export class SqliteMetadataStore implements IMetadataStore {
         .run(newVersion, vaultId);
 
       const now = Date.now();
-      const findExistingStmt = this.db.prepare(
+      const committedChanges: Array<{ id: string; encryptedPath: string }> = [];
+      const findByIdStmt = this.db.prepare(
+        'SELECT id FROM file_records WHERE vault_id = ? AND id = ?'
+      );
+      const findByPathStmt = this.db.prepare(
         'SELECT id FROM file_records WHERE vault_id = ? AND encrypted_path = ?'
       );
       const updateStmt = this.db.prepare(
-        `UPDATE file_records 
-         SET content_hash = ?, size = ?, version = ?, is_deleted = ?, mtime = ?, updated_at = ? 
+        `UPDATE file_records
+         SET encrypted_path = ?, content_hash = ?, size = ?, version = ?, is_deleted = ?, mtime = ?, updated_at = ?
          WHERE id = ?`
       );
       const insertStmt = this.db.prepare(
-        `INSERT INTO file_records (id, vault_id, encrypted_path, content_hash, size, version, is_deleted, mtime, updated_at) 
+        `INSERT INTO file_records (id, vault_id, encrypted_path, content_hash, size, version, is_deleted, mtime, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 
       for (const item of changes) {
-        const existing = findExistingStmt.get(vaultId, item.encryptedPath) as { id: string } | undefined;
+        const existingById = item.id
+          ? (findByIdStmt.get(vaultId, item.id) as { id: string } | undefined)
+          : undefined;
+        const existingByPath = findByPathStmt.get(vaultId, item.encryptedPath) as
+          | { id: string }
+          | undefined;
+        const existing = existingById || existingByPath;
         const isDel = item.isDeleted ? 1 : 0;
+
+        if (existingById && existingByPath && existingById.id !== existingByPath.id) {
+          throw new StorageConflictError(
+            'identity-conflict',
+            'File identity conflicts with encrypted path'
+          );
+        }
+
+        const fileId = existing?.id || item.id || randomUUID();
+        committedChanges.push({ id: fileId, encryptedPath: item.encryptedPath });
 
         if (existing) {
           updateStmt.run(
+            item.encryptedPath,
             item.contentHash,
             item.size,
             newVersion,
@@ -393,7 +529,6 @@ export class SqliteMetadataStore implements IMetadataStore {
             existing.id
           );
         } else {
-          const fileId = item.id || randomUUID();
           insertStmt.run(
             fileId,
             vaultId,
@@ -408,19 +543,28 @@ export class SqliteMetadataStore implements IMetadataStore {
         }
       }
 
+      const result = {
+        success: true,
+        newVersion,
+        committedCount: changes.length,
+        requestId,
+        changes: committedChanges
+      };
+      if (requestId) {
+        this.db.prepare(
+          'INSERT INTO commit_receipts (vault_id, request_id, payload_hash, new_version, committed_count, changes_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(vaultId, requestId, this.getCommitPayloadHash(changes), newVersion, changes.length, JSON.stringify(committedChanges), now);
+      }
+
       this.db
         .prepare(
-          `INSERT INTO devices (id, vault_id, device_name, last_seen) 
-           VALUES (?, ?, ?, ?) 
+          `INSERT INTO devices (id, vault_id, device_name, last_seen)
+           VALUES (?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`
         )
         .run(deviceId, vaultId, deviceId, now);
 
-      return {
-        success: true,
-        newVersion,
-        committedCount: changes.length
-      };
+      return result;
     });
 
     return transaction();
@@ -437,6 +581,15 @@ export class SqliteMetadataStore implements IMetadataStore {
       )
       .all(vaultId, sinceMs) as Array<{ day: string; count: number }>;
     return rows;
+  }
+
+  async listActiveBlobHashes(vaultId: string): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        'SELECT DISTINCT content_hash as hash FROM file_records WHERE vault_id = ? AND is_deleted = 0'
+      )
+      .all(vaultId) as Array<{ hash: string }>;
+    return rows.map((r) => r.hash);
   }
 
   // Admin analytics
@@ -477,6 +630,53 @@ export class SqliteMetadataStore implements IMetadataStore {
     return rows;
   }
 
+  async createDeletionJob(
+    resourceType: 'vault' | 'user',
+    resourceId: string,
+    ownerUserId?: string
+  ): Promise<DeletionJob> {
+    const jobId = randomUUID();
+    const now = Date.now();
+    this.db
+      .prepare(
+        'INSERT INTO deletion_jobs (job_id, resource_type, resource_id, owner_user_id, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)'
+      )
+      .run(jobId, resourceType, resourceId, ownerUserId ?? null, 'pending', now, now);
+    return {
+      jobId,
+      resourceType,
+      resourceId,
+      ownerUserId: ownerUserId ?? null,
+      status: 'pending',
+      attempts: 0,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  async getDeletionJob(jobId: string): Promise<DeletionJob | null> {
+    const row = this.db
+      .prepare(
+        'SELECT job_id as jobId, resource_type as resourceType, resource_id as resourceId, owner_user_id as ownerUserId, status, attempts, last_error as lastError, created_at as createdAt, updated_at as updatedAt FROM deletion_jobs WHERE job_id = ?'
+      )
+      .get(jobId) as DeletionJob | undefined;
+    return row || null;
+  }
+
+  async updateDeletionJob(
+    jobId: string,
+    status: DeletionJobStatus,
+    lastError?: string | null
+  ): Promise<DeletionJob | null> {
+    this.db
+      .prepare(
+        'UPDATE deletion_jobs SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ? WHERE job_id = ?'
+      )
+      .run(status, lastError ?? null, Date.now(), jobId);
+    return this.getDeletionJob(jobId);
+  }
+
   async deleteUser(userId: string): Promise<void> {
     const tx = this.db.transaction(() => {
       const vaults = this.db.prepare('SELECT id FROM vaults WHERE user_id = ?').all(userId) as Array<{
@@ -485,9 +685,10 @@ export class SqliteMetadataStore implements IMetadataStore {
       for (const v of vaults) {
         this.db.prepare('DELETE FROM file_records WHERE vault_id = ?').run(v.id);
         this.db.prepare('DELETE FROM devices WHERE vault_id = ?').run(v.id);
+        this.db.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').run(v.id);
       }
       this.db.prepare('DELETE FROM vaults WHERE user_id = ?').run(userId);
-      this.db.prepare('DELETE FROM user_tokens WHERE user_id = ?').run(userId);
+      this.db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM users WHERE id = ?').run(userId);
     });
     tx();
