@@ -3,7 +3,7 @@ version: '3.8'
 services:
   onyx:
     # Prebuilt multi-arch Alpine image (auto-built by CI on every push to main)
-    image: ghcr.io/dxer/onyx:latest
+    image: ghcr.io/dxer/onyx-sync:latest
     # Or build locally from source:
     # build:
     #   context: .

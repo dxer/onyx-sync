@@ -2,7 +2,7 @@ name: Docker
 
 # Build the Alpine image (linux/amd64) and push it to GitHub Container
 # Registry on every push to main. Version tags (v*) also produce
-# semver-tagged images (e.g. ghcr.io/dxer/onyx:1.2.0).
+# semver-tagged images (e.g. ghcr.io/dxer/onyx-sync:1.2.0).
 on:
   push:
     branches: [main]

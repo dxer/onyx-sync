@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-000000.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-000000?style=flat-square)](https://obsidian.md)
 [![Node](https://img.shields.io/badge/Node-%3E%3D18-000000?style=flat-square)](package.json)
-[![PRs Welcome](https://img.shields.io/badge/PRs-%E6%AC%A2%E8%BF%8E-000000?style=flat-square)](https://github.com/dxer/onyx/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-%E6%AC%A2%E8%BF%8E-000000?style=flat-square)](https://github.com/dxer/onyx-sync/pulls)
 
 **Onyx Server** 可部署在 [Cloudflare Workers](https://workers.cloudflare.com/) 的免费套餐上，也可以用 Docker 跑在任意廉价 VPS 上。**Onyx Sync** 是与之配套的 Obsidian 插件。
 
@@ -87,8 +87,8 @@ Markdown 笔记采用**三路合并**（通过 `diff-match-patch` 对比 基准�
 **方式 A —— VPS / 本地机器（Node.js ≥ 18）：**
 
 ```bash
-git clone https://github.com/dxer/onyx.git
-cd onyx
+git clone https://github.com/dxer/onyx-sync.git
+cd onyx-sync
 cp .env.example .env          # 修改 ADMIN_USERNAME / ADMIN_PASSWORD
 pnpm install
 pnpm build
@@ -100,7 +100,7 @@ pnpm start
 **方式 B —— Docker（CI 预构建的 Alpine 镜像）：**
 
 ```bash
-# 使用 ghcr.io/dxer/onyx:latest（linux/amd64）
+# 使用 ghcr.io/dxer/onyx-sync:latest（linux/amd64）
 docker compose up -d
 ```
 

@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-000000.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-000000?style=flat-square)](https://obsidian.md)
 [![Node](https://img.shields.io/badge/Node-%3E%3D18-000000?style=flat-square)](package.json)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-000000?style=flat-square)](https://github.com/dxer/onyx/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-000000?style=flat-square)](https://github.com/dxer/onyx-sync/pulls)
 
 **Onyx Server** runs on a free [Cloudflare Workers](https://workers.cloudflare.com/) tier — or any cheap VPS with Docker. **Onyx Sync** is the Obsidian plugin that talks to it.
 
@@ -87,8 +87,8 @@ Markdown notes use **three-way merge** (base vs. local vs. remote via `diff-matc
 **Option A — VPS / local machine (Node.js ≥ 18):**
 
 ```bash
-git clone https://github.com/dxer/onyx.git
-cd onyx
+git clone https://github.com/dxer/onyx-sync.git
+cd onyx-sync
 cp .env.example .env          # edit ADMIN_USERNAME / ADMIN_PASSWORD
 pnpm install
 pnpm build
@@ -100,7 +100,7 @@ Console is now live at `http://localhost:8080`.
 **Option B — Docker (prebuilt Alpine image, auto-built by CI):**
 
 ```bash
-# uses ghcr.io/dxer/onyx:latest (linux/amd64)
+# uses ghcr.io/dxer/onyx-sync:latest (linux/amd64)
 docker compose up -d
 ```
 

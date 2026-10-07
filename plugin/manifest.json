@@ -3,8 +3,8 @@
   "name": "Onyx Sync",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "Zero-Knowledge End-to-End Encrypted sync engine for Obsidian (Onyx). Supports VPS self-hosting and Cloudflare Serverless.",
-  "author": "Onyx Community",
-  "authorUrl": "https://github.com",
+  "description": "Zero-knowledge end-to-end encrypted sync engine. Supports VPS self-hosting and Cloudflare Serverless.",
+  "author": "dxer",
+  "authorUrl": "https://github.com/dxer",
   "isDesktopOnly": false
 }
