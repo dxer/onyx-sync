@@ -12,6 +12,8 @@
     "build:server": "pnpm build:node && pnpm build:worker",
     "build": "pnpm build:shared && pnpm build:server",
     "start": "node dist/node/entry-node.js",
+    "admin:reset-password": "tsx src/entry-node.ts admin:reset-password",
+    "admin:hash-password": "tsx src/entry-node.ts admin:hash-password",
     "dev": "tsx watch src/entry-node.ts",
     "test": "vitest run"
   },

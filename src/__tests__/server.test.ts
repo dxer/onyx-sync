@@ -5,6 +5,15 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import type { Hono } from 'hono';
 import { createApp, type AppContext } from '../app';
+import { ensureAdminFromEnv } from '../admin-bootstrap';
+import {
+  hashPasswordForManualSql,
+  parseAdminResetArgs,
+  parsePasswordArg,
+  parseUsernameArg,
+  resetUserPassword
+} from '../admin-cli';
+import { hashPassword, newSalt } from '../auth-utils';
 import { SqliteMetadataStore } from '../storage/sqlite';
 import { LocalFsBlobStore } from '../storage/fs-blob';
 import type { IBlobStore } from '../storage/types';
@@ -876,3 +885,148 @@ describe('Legacy database migration (pre-lifecycle schema)', () => {
 function testHashOfLength64(): string {
   return 'f'.repeat(64);
 }
+
+describe('Admin bootstrap is init-only (no .env backdoor)', () => {
+  it('creates once; later boots never overwrite the password', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-adminboot-'));
+    const store = new SqliteMetadataStore(join(dir, 'admin.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+    const bootApp = createApp({ metadata: store, blobs });
+
+    const login = (password: string) =>
+      bootApp.request('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'root', password })
+      });
+
+    expect(await ensureAdminFromEnv(store, {})).toBe('skipped');
+    expect(await ensureAdminFromEnv(store, { adminUsername: 'root' })).toBe('skipped');
+
+    expect(
+      await ensureAdminFromEnv(store, { adminUsername: 'root', adminPassword: 'first-secret-1' })
+    ).toBe('created');
+    expect((await login('first-secret-1')).status).toBe(200);
+
+    // A leaked/rotated .env must NOT take over the existing account
+    expect(
+      await ensureAdminFromEnv(store, { adminUsername: 'root', adminPassword: 'attacker-secret-2' })
+    ).toBe('already-exists');
+    expect((await login('attacker-secret-2')).status).toBe(401);
+    expect((await login('first-secret-1')).status).toBe(200);
+
+    const kept = await store.getUserByUsername('root');
+    expect(kept?.role).toBe('admin');
+
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Admin password reset (console path)', () => {
+  it('lets admins reset passwords without touching roles; non-admins are rejected', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-adminreset-'));
+    const store = new SqliteMetadataStore(join(dir, 'reset.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+    const resetApp = createApp({ metadata: store, blobs });
+
+    const post = (path: string, token: string | null, body: unknown) =>
+      resetApp.request(path, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(body)
+      });
+
+    // First registered user becomes admin
+    const reg = await post('/api/v1/auth/register', null, { username: 'boss', password: 'boss-secret-1' });
+    expect(reg.status).toBe(201);
+    const adminToken = (await reg.json() as { token: string }).token;
+
+    const created = await post('/api/v1/admin/users', adminToken, {
+      username: 'carol',
+      password: 'carol-secret-1',
+      role: 'user'
+    });
+    expect(created.status).toBe(201);
+    const carolId = (await created.json() as { user: { id: string } }).user.id;
+
+    const loginCarol = (password: string) =>
+      post('/api/v1/auth/login', null, { username: 'carol', password });
+
+    // Weak password is rejected before anything changes
+    expect((await post(`/api/v1/admin/users/${carolId}/password`, adminToken, { password: 'x' })).status).toBe(400);
+    expect((await loginCarol('carol-secret-1')).status).toBe(200);
+
+    // Unknown user
+    expect((await post('/api/v1/admin/users/does-not-exist/password', adminToken, { password: 'carol-secret-2' })).status).toBe(404);
+
+    // Non-admin cannot reset anyone (carol logs in to get a master token first)
+    const carolLogin = await loginCarol('carol-secret-1');
+    const carolToken = (await carolLogin.json() as { token: string }).token;
+    expect((await post(`/api/v1/admin/users/${carolId}/password`, carolToken, { password: 'carol-secret-2' })).status).toBe(403);
+    expect((await loginCarol('carol-secret-1')).status).toBe(200);
+
+    // Admin reset works; old password dies, role is untouched
+    expect((await post(`/api/v1/admin/users/${carolId}/password`, adminToken, { password: 'carol-secret-2' })).status).toBe(200);
+    expect((await loginCarol('carol-secret-1')).status).toBe(401);
+    expect((await loginCarol('carol-secret-2')).status).toBe(200);
+    expect((await store.getUserByUsername('carol'))?.role).toBe('user');
+
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('admin-cli recovery helpers', () => {
+  it('parses argv and env sources, rejecting missing/weak input', () => {
+    expect(parseAdminResetArgs(['--username', 'root', '--password', 's3cret-12'])).toEqual({
+      username: 'root',
+      password: 's3cret-12'
+    });
+    expect(parseAdminResetArgs(['--username=root', '--password=s3cret-12'])).toEqual({
+      username: 'root',
+      password: 's3cret-12'
+    });
+    expect(parseAdminResetArgs(['-u', ' root '], { ONYX_RESET_PASSWORD: 'env-secret-1' })).toEqual({
+      username: 'root',
+      password: 'env-secret-1'
+    });
+    expect(() => parseAdminResetArgs(['--password', 's3cret-12'], {})).toThrow(/username/i);
+    expect(() => parseAdminResetArgs(['--username', 'root', '--password', 'x'], {})).toThrow();
+    expect(parsePasswordArg(['-p', 'pw-secret-1'], {})).toBe('pw-secret-1');
+    expect(parsePasswordArg([], { ONYX_RESET_PASSWORD: 'env-secret-2' })).toBe('env-secret-2');
+    expect(parseUsernameArg(['-u', 'root'])).toBe('root');
+    expect(parseUsernameArg([])).toBe('<username>');
+  });
+
+  it('resets in-store passwords without escalating roles; unknown users fail', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-admincli-'));
+    const store = new SqliteMetadataStore(join(dir, 'cli.db'));
+    await store.init();
+
+    await expect(resetUserPassword(store, { username: 'ghost', password: 'ghost-secret-1' })).rejects.toThrow(/does not exist/);
+
+    const salt = newSalt();
+    const user = await store.createUser('dave', await hashPassword('dave-secret-1', salt), salt, 'user');
+    const reset = await resetUserPassword(store, { username: 'dave', password: 'dave-secret-2' });
+    expect(reset.userId).toBe(user.id);
+
+    const after = await store.getUserByUsername('dave');
+    expect(after?.role).toBe('user');
+    expect(await hashPassword('dave-secret-2', after!.salt)).toBe(after!.passwordHash);
+
+    const manual = await hashPasswordForManualSql('manual-secret-1');
+    expect(manual.salt).toMatch(/^[a-f0-9]+$/);
+    expect(manual.passwordHash).toMatch(/^[a-f0-9]{64}$/);
+
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});

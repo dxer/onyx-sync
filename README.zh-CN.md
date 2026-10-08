@@ -143,8 +143,8 @@ wrangler deploy
 | 变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP 端口 |
-| `ADMIN_USERNAME` | `admin` | 自动开通的超级管理员 |
-| `ADMIN_PASSWORD` | — | 每次启动自动同步进数据库 |
+| `ADMIN_USERNAME` | `admin` | 超级管理员（仅首次启动时自动开通） |
+| `ADMIN_PASSWORD` | — | **仅首次启动消费一次**用于创建管理员，之后修改无效 |
 | `DB_PATH` | `./data/sync.db` | SQLite 元数据文件 |
 | `STORAGE_TYPE` | `local` | `local` 或 `s3`（S3 / MinIO / R2） |
 | `STORAGE_LOCAL_DIR` | `./data/blobs` | 密文块根目录（每个仓库一个子目录） |
@@ -180,6 +180,31 @@ DELETE /api/v1/user/tokens/:tokenId       # 吊销凭据
 `POST /api/v1/ws/ticket` 换取 60 秒一次性 ticket，再连接 `/api/v1/ws?ticket=…`；
 吊销令牌会主动断开其活动连接。Cloudflare Worker 部署只提供 REST + 轮询
 （不做跨实例 WebSocket 广播）；ticket 接口在 Worker 上返回 `501`，插件会自动回退到定时轮询。
+
+---
+
+## 忘记密码怎么办
+
+**常规路径**——找另一位管理员在控制台“用户管理 → 重置密码”处理
+（接口 `POST /api/v1/admin/users/:id/password`），用户用新密码登录即可。
+所有重置都会以 `[AUDIT] action=…` 写入服务端日志，请把日志接入持久化存储。
+
+**最后一位管理员也被锁住**——需要能登录服务器本机（有这权限本来就能动全部数据，
+所以这条路是安全的，而 `.env` 改密码则不是）：
+
+```bash
+# Node / Docker（SQLite），密码走环境变量可避免进 shell 历史：
+ONYX_RESET_PASSWORD=<新密码> pnpm admin:reset-password -- --username admin
+
+# 或在运行中的容器里执行：
+docker exec onyx-sync-server node dist/node/entry-node.js admin:reset-password \
+  --username admin --password <新密码>
+
+# Cloudflare Worker（D1，没有 shell）：先生成盐值+哈希，再执行 SQL
+pnpm admin:hash-password -- --username admin --password <新密码>
+wrangler d1 execute onyx-db --command \
+  "UPDATE users SET password_hash = '<哈希>', salt = '<盐值>' WHERE username = 'admin';"
+```
 
 ---
 

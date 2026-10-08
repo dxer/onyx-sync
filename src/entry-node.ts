@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createApp } from './app';
+import { ensureAdminFromEnv } from './admin-bootstrap';
+import { hashPasswordForManualSql, parseAdminResetArgs, parsePasswordArg, parseUsernameArg, resetUserPassword } from './admin-cli';
 import { SqliteMetadataStore } from './storage/sqlite';
 import { LocalFsBlobStore } from './storage/fs-blob';
 import { S3BlobStore } from './storage/s3-blob';
 import type { IMetadataStore, INotifier } from './storage/types';
 import { verifyWsTicket } from './ws-tickets';
-import { hashPassword, newSalt } from './auth-utils';
 
 // Load .env configuration
 function loadEnv() {
@@ -151,32 +152,13 @@ const app = createApp({
   wsTicketSecret: WS_TICKET_SECRET
 });
 
-// Helper: Ensure administrator account matches .env configuration
-async function syncAdminFromEnv(metadataStore: IMetadataStore) {
-  const adminUsername = process.env.ADMIN_USERNAME?.trim();
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminUsername || !adminPassword) {
-    return;
-  }
-
-  const existingUser = await metadataStore.getUserByUsername(adminUsername);
-  if (!existingUser) {
-    const salt = newSalt();
-    const passwordHash = await hashPassword(adminPassword, salt);
-    await metadataStore.createUser(adminUsername, passwordHash, salt, 'admin');
-    console.log(`[Auth] Initialized super administrator "${adminUsername}" from .env.`);
-  } else {
-    const computedHash = await hashPassword(adminPassword, existingUser.salt);
-    if (computedHash !== existingUser.passwordHash || existingUser.role !== 'admin') {
-      const salt = newSalt();
-      const passwordHash = await hashPassword(adminPassword, salt);
-      await metadataStore.updateUserPassword(existingUser.id, passwordHash, salt, 'admin');
-      console.log(`[Auth] Synchronized super administrator "${adminUsername}" password from .env.`);
-    } else {
-      console.log(`[Auth] Super administrator "${adminUsername}" verified from .env.`);
-    }
-  }
+// First-boot admin provisioning. ADMIN_PASSWORD is honored exactly once —
+// it never overwrites an existing account (see src/admin-bootstrap.ts).
+async function ensureAdminAccount(metadataStore: IMetadataStore) {
+  await ensureAdminFromEnv(metadataStore, {
+    adminUsername: process.env.ADMIN_USERNAME?.trim(),
+    adminPassword: process.env.ADMIN_PASSWORD
+  });
 }
 
 // 5. Bootstrap Server
@@ -187,7 +169,7 @@ async function bootstrap() {
   }
 
   // Synchronize admin credentials from .env
-  await syncAdminFromEnv(metadata);
+  await ensureAdminAccount(metadata);
 
   const server = serve({
     fetch: app.fetch,
@@ -267,7 +249,48 @@ async function bootstrap() {
   console.log('🔌 WebSocket real-time endpoint at /api/v1/ws (short-lived ticket auth via POST /api/v1/ws/ticket)');
 }
 
-bootstrap().catch((err) => {
-  console.error('Fatal bootstrap error:', err);
-  process.exit(1);
-});
+// Local recovery subcommands. These run INSTEAD of the server and need only
+// the metadata store — e.g. inside Docker:
+//   docker exec onyx-sync-server node dist/node/entry-node.js admin:reset-password --username admin --password <new>
+// The password may also come from ONYX_RESET_PASSWORD to keep it out of shell history.
+async function runAdminSubcommand(command: string, args: string[]): Promise<void> {
+  const store = new SqliteMetadataStore(DB_PATH);
+  await store.init();
+  try {
+    if (command === 'admin:reset-password') {
+      const parsed = parseAdminResetArgs(args);
+      const result = await resetUserPassword(store, parsed);
+      console.log(
+        `[Auth] Password for "${result.username}" has been reset. ` +
+          `Ship the [AUDIT] line above to your persistent logs.`
+      );
+    } else {
+      const username = parseUsernameArg(args) || '<username>';
+      const password = parsePasswordArg(args);
+      const { salt, passwordHash } = await hashPasswordForManualSql(password);
+      console.log(`salt: ${salt}`);
+      console.log(`password_hash: ${passwordHash}`);
+      console.log(
+        `SQL: UPDATE users SET password_hash = '${passwordHash}', salt = '${salt}' WHERE username = '${username}';`
+      );
+    }
+  } finally {
+    store.close();
+  }
+}
+
+const subcommand = process.argv[2];
+if (subcommand === 'admin:reset-password' || subcommand === 'admin:hash-password') {
+  runAdminSubcommand(subcommand, process.argv.slice(3)).then(
+    () => process.exit(0),
+    (err) => {
+      console.error(`[Auth] ${subcommand} failed:`, err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  );
+} else {
+  bootstrap().catch((err) => {
+    console.error('Fatal bootstrap error:', err);
+    process.exit(1);
+  });
+}

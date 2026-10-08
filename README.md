@@ -143,8 +143,8 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `PORT` | `8080` | HTTP port |
-| `ADMIN_USERNAME` | `admin` | Auto-provisioned super administrator |
-| `ADMIN_PASSWORD` | — | Synced into the DB on every boot |
+| `ADMIN_USERNAME` | `admin` | Auto-provisioned super administrator (first boot only) |
+| `ADMIN_PASSWORD` | — | Consumed **once** on first boot to create the admin; ignored afterwards |
 | `DB_PATH` | `./data/sync.db` | SQLite metadata file |
 | `STORAGE_TYPE` | `local` | `local` or `s3` (S3 / MinIO / R2) |
 | `STORAGE_LOCAL_DIR` | `./data/blobs` | Blob root (one subfolder per vault) |
@@ -170,8 +170,38 @@ The server speaks plain HTTP itself — put it behind an HTTPS reverse proxy
   client can spoof its IP and dodge the limit.
 - **`WS_TICKET_SECRET`**: set a stable value, otherwise all WebSocket
   sessions drop on every restart.
-- **`ADMIN_PASSWORD`**: change it from the example; it is synced into the
-  DB on every boot.
+- **`ADMIN_PASSWORD`**: consumed exactly once, on first boot, to create the
+  admin account. Later edits are ignored — rotate passwords in the console
+  (Users → Reset password) instead.
+- **Audit trail**: admin creation, user creation/deletion and every password
+  reset are logged as `[AUDIT] action=…` lines. Ship server logs to persistent
+  storage; they are your proof of who changed what.
+
+---
+
+## Account Recovery (forgotten passwords)
+
+**Normal path** — any other admin resets it in the console (Users → Reset
+password, backed by `POST /api/v1/admin/users/:id/password`). The user logs
+in with the new password; nothing else needs to change.
+
+**Last-admin-locked-out path** — requires shell access to the server host,
+which already implies full control over the data (that is what makes this
+safe while `.env`-driven resets are not):
+
+```bash
+# Node / Docker (SQLite). Password via env keeps it out of shell history:
+ONYX_RESET_PASSWORD=<new-secret> pnpm admin:reset-password -- --username admin
+
+# ...or inside the running container:
+docker exec onyx-sync-server node dist/node/entry-node.js admin:reset-password \
+  --username admin --password <new-secret>
+
+# Cloudflare Worker (D1, no shell): generate salt+hash, then apply via SQL
+pnpm admin:hash-password -- --username admin --password <new-secret>
+wrangler d1 execute onyx-db --command \
+  "UPDATE users SET password_hash = '<hash>', salt = '<salt>' WHERE username = 'admin';"
+```
 
 ---
 

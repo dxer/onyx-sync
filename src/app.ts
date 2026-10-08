@@ -869,6 +869,7 @@ export function createApp(config?: AppConfig) {
     if (!user || user.role !== 'admin') {
       return c.json({ error: 'Forbidden: Admin access required' }, 403);
     }
+    c.set('currentUser', user);
     await next();
   };
 
@@ -905,8 +906,25 @@ export function createApp(config?: AppConfig) {
     const salt = newSalt();
     const passwordHash = await hashPassword(password, salt);
     const user = await metadata.createUser(username, passwordHash, salt, role);
+    console.log(`[AUDIT] action=admin-create-user actor="${c.get('currentUser')?.username}" username="${username}" userId=${user.id} role=${role}`);
 
     return c.json({ user }, 201);
+  });
+
+  app.post('/api/v1/admin/users/:id/password', checkAdmin, async (c) => {
+    const metadata = c.get('metadata');
+    const body = await readJson<{ password: string }>(c.req.raw);
+    assertNewPassword(body?.password);
+
+    const target = await metadata.getUserById(c.req.param('id'));
+    if (!target) return c.json({ error: 'User not found' }, 404);
+
+    const salt = newSalt();
+    const passwordHash = await hashPassword(body.password, salt);
+    // Role is preserved (omitted): a password reset must never change privileges.
+    await metadata.updateUserPassword(target.id, passwordHash, salt);
+    console.log(`[AUDIT] action=admin-password-reset actor="${c.get('currentUser')?.username}" username="${target.username}" userId=${target.id}`);
+    return c.json({ success: true });
   });
 
   app.delete('/api/v1/admin/users/:id', checkAdmin, async (c) => {
@@ -931,6 +949,7 @@ export function createApp(config?: AppConfig) {
       }
     }
     await metadata.deleteUser(userId);
+    console.log(`[AUDIT] action=admin-delete-user actor="${c.get('currentUser')?.username}" userId=${userId} vaults=${jobs.length}`);
     return c.json({ success: true, jobs });
   });
 

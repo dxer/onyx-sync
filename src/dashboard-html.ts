@@ -70,6 +70,9 @@ export const DASHBOARD_APP_JS = `const I18N = {
         thRegisteredAt: '开通时间',
         thActions: '操作',
         deleteUserBtn: '删除用户',
+        resetPasswordBtn: '重置密码',
+        resetPasswordPrompt: '请输入用户“{username}”的新密码（至少 6 位）：',
+        resetPasswordDone: '用户“{username}”的密码已重置。',
         currentAccountBadge: '当前登录',
         modalNewVaultTitle: '新建同步知识库',
         modalNewVaultDesc: '系统将为该知识库分配独立物理存储分区与随机密码派生盐。',
@@ -190,6 +193,9 @@ export const DASHBOARD_APP_JS = `const I18N = {
         thRegisteredAt: 'Provisioned',
         thActions: 'Actions',
         deleteUserBtn: 'Delete',
+        resetPasswordBtn: 'Reset password',
+        resetPasswordPrompt: 'Enter a new password for "{username}" (min 6 chars):',
+        resetPasswordDone: 'Password for "{username}" has been reset.',
         currentAccountBadge: 'Current',
         modalNewVaultTitle: 'Create New Sync Vault',
         modalNewVaultDesc: 'A dedicated storage partition and random password derivation salt will be provisioned.',
@@ -775,6 +781,26 @@ export const DASHBOARD_APP_JS = `const I18N = {
           }
         },
 
+        async resetUserPassword(userId, username) {
+          const next = prompt(this.t('resetPasswordPrompt', { username }));
+          if (!next) return;
+          try {
+            const res = await this.api('/api/v1/admin/users/' + userId + '/password', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: next })
+            });
+            if (!res.ok) {
+              const data = await res.json();
+              alert(data.error || 'Unknown error');
+              return;
+            }
+            alert(this.t('resetPasswordDone', { username }));
+          } catch (err) {
+            alert(err.message);
+          }
+        },
+
         async deleteUser(userId, username) {
           if (!confirm(this.t('confirmDeleteUser', { username }))) return;
           try {
@@ -1262,6 +1288,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     <td class="px-5 py-3 font-mono text-black" x-text="formatBytes(u.totalStorageBytes)"></td>
                     <td class="px-5 py-3 text-[#888888] text-[11px] font-mono" x-text="new Date(u.createdAt).toLocaleString()"></td>
                     <td class="px-5 py-3 text-right">
+                      <button @click="resetUserPassword(u.id, u.username)" class="text-[11px] text-[#0070f3] hover:underline font-medium mr-3" x-text="t('resetPasswordBtn')"></button>
                       <button x-show="u.username !== currentUser?.username" @click="deleteUser(u.id, u.username)" class="text-[11px] text-[#ee0000] hover:underline font-medium" x-text="t('deleteUserBtn')"></button>
                       <span x-show="u.username === currentUser?.username" class="text-[11px] text-[#888888] font-mono" x-text="t('currentAccountBadge')"></span>
                     </td>
