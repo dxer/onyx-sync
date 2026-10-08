@@ -1,14 +1,11 @@
 name: Docker
 
 # Build the Alpine image (linux/amd64) and push it to GitHub Container
-# Registry on every push to main. Version tags (v*) also produce
-# semver-tagged images (e.g. ghcr.io/dxer/onyx-sync:1.2.0).
+# Registry on version tags (v*) only. Tags produced: semver (1.2.0, 1.2),
+# commit sha, and latest (= newest version tag).
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
 
 env:
   REGISTRY: ghcr.io
@@ -41,7 +38,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
