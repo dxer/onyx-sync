@@ -200,8 +200,10 @@ ONYX_RESET_PASSWORD=<新密码> pnpm admin:reset-password -- --username admin
 docker exec onyx-sync-server node dist/node/entry-node.js admin:reset-password \
   --username admin --password <新密码>
 
-# Cloudflare Worker（D1，没有 shell）：先生成盐值+哈希，再执行 SQL
-pnpm admin:hash-password -- --username admin --password <新密码>
+# Cloudflare Worker（D1，没有 shell）：一条命令（需要该 Cloudflare 账户的 wrangler 权限）
+pnpm admin:reset-password:d1 -- --username admin --password <新密码>
+# 也可分两步走（先取盐值+哈希，再手写 SQL）：
+pnpm admin:hash-password -- --password <新密码>
 wrangler d1 execute onyx-db --command \
   "UPDATE users SET password_hash = '<哈希>', salt = '<盐值>' WHERE username = 'admin';"
 ```

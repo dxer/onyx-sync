@@ -197,8 +197,10 @@ ONYX_RESET_PASSWORD=<new-secret> pnpm admin:reset-password -- --username admin
 docker exec onyx-sync-server node dist/node/entry-node.js admin:reset-password \
   --username admin --password <new-secret>
 
-# Cloudflare Worker (D1, no shell): generate salt+hash, then apply via SQL
-pnpm admin:hash-password -- --username admin --password <new-secret>
+# Cloudflare Worker (D1, no shell): one command (needs wrangler auth for the account)
+pnpm admin:reset-password:d1 -- --username admin --password <new-secret>
+# ...or raw SQL if you prefer (get salt+hash from the line above without --username):
+pnpm admin:hash-password -- --password <new-secret>
 wrangler d1 execute onyx-db --command \
   "UPDATE users SET password_hash = '<hash>', salt = '<salt>' WHERE username = 'admin';"
 ```

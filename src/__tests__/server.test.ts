@@ -13,6 +13,7 @@ import {
   parseUsernameArg,
   resetUserPassword
 } from '../admin-cli';
+import { buildResetSql, resetD1Password, splitD1Args } from '../admin-reset-d1';
 import { hashPassword, newSalt } from '../auth-utils';
 import { SqliteMetadataStore } from '../storage/sqlite';
 import { LocalFsBlobStore } from '../storage/fs-blob';
@@ -1004,6 +1005,32 @@ describe('admin-cli recovery helpers', () => {
     expect(parsePasswordArg([], { ONYX_RESET_PASSWORD: 'env-secret-2' })).toBe('env-secret-2');
     expect(parseUsernameArg(['-u', 'root'])).toBe('root');
     expect(parseUsernameArg([])).toBe('<username>');
+  });
+
+  it('splits D1 wrapper flags, escapes SQL literals, and drives wrangler', async () => {
+    expect(splitD1Args(['--username', 'root', '--password', 'x', '--db', 'mydb', '--local'])).toEqual({
+      db: 'mydb',
+      local: true,
+      rest: ['--username', 'root', '--password', 'x']
+    });
+    expect(splitD1Args(['--db=other', '--remote', '-u', 'root'])).toEqual({
+      db: 'other',
+      local: false,
+      rest: ['-u', 'root']
+    });
+    expect(buildResetSql("o'brien", 'salt1', 'hash1')).toBe(
+      "UPDATE users SET password_hash = 'hash1', salt = 'salt1' WHERE username = 'o''brien';"
+    );
+
+    const calls: string[][] = [];
+    const result = await resetD1Password(['--username', 'root', '--password', 'd1-secret-1'], {}, async (args) => {
+      calls.push(args);
+      return { stdout: 'ok', stderr: '' };
+    });
+    expect(result).toEqual({ db: 'onyx-db', local: false, username: 'root' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].slice(0, 4)).toEqual(['d1', 'execute', 'onyx-db', '--remote']);
+    expect(calls[0][5]).toMatch(/^UPDATE users SET password_hash = '[a-f0-9]{64}', salt = '[a-f0-9]+' WHERE username = 'root';$/);
   });
 
   it('resets in-store passwords without escalating roles; unknown users fail', async () => {
