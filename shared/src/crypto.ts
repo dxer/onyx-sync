@@ -1,16 +1,38 @@
 /**
  * E2EE Cryptographic Module for Obsidian Sync
  * Built entirely on standard Web Crypto API (SubtleCrypto)
- * Fully compatible with Node.js 18+, Modern Browsers, Electron, and Mobile (Capacitor/iOS/Android)
+ * Fully compatible with Modern Browsers, Electron, and Mobile (Capacitor/iOS/Android)
  */
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-// Helper to get crypto implementation
+function toBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+// Helper to get crypto implementation safely across Node.js, Workers, and Obsidian.
+function getCrypto(): Crypto {
+  if (typeof window !== 'undefined' && window.crypto) {
+    return window.crypto;
+  }
+  const rootObj = typeof window !== 'undefined'
+    ? window
+    : (typeof self !== 'undefined'
+      ? self
+      : (typeof globalThis !== 'undefined' ? globalThis : null));
+  if (rootObj && 'crypto' in rootObj && rootObj.crypto) {
+    return rootObj.crypto;
+  }
+  throw new Error('Web Crypto API is not available in this environment');
+}
+
 function getSubtleCrypto(): SubtleCrypto {
-  if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.subtle) {
-    return globalThis.crypto.subtle;
+  const cryptoImpl = getCrypto();
+  if (cryptoImpl.subtle) {
+    return cryptoImpl.subtle;
   }
   throw new Error('Web Crypto API (crypto.subtle) is not available in this environment');
 }
@@ -20,7 +42,7 @@ function getSubtleCrypto(): SubtleCrypto {
  */
 export function getRandomBytes(byteLength: number): Uint8Array {
   const bytes = new Uint8Array(byteLength);
-  globalThis.crypto.getRandomValues(bytes);
+  getCrypto().getRandomValues(bytes);
   return bytes;
 }
 
@@ -37,7 +59,9 @@ export function generateSalt(): Uint8Array {
 export function bytesToHex(bytes: Uint8Array): string {
   let hex = '';
   for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
+    const value = bytes[i];
+    const text = (typeof value === 'number' ? value : 0).toString(16);
+    hex += text.length < 2 ? '0' + text : text;
   }
   return hex;
 }
@@ -60,7 +84,8 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = '';
   const len = bytes.byteLength;
   for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+    const value = bytes[i];
+    binary += String.fromCharCode(typeof value === 'number' ? value : 0);
   }
   const base64 = btoa(binary);
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -97,7 +122,7 @@ export async function deriveMasterKey(passphrase: string, salt: Uint8Array): Pro
   const derivedBits = await subtle.deriveBits(
     {
       name: 'PBKDF2',
-      salt,
+      salt: toBuffer(salt),
       iterations: 100000,
       hash: 'SHA-256'
     },
@@ -169,10 +194,10 @@ export async function encryptData(data: Uint8Array | string, dataKey: CryptoKey)
   const encryptedBuffer = await subtle.encrypt(
     {
       name: 'AES-GCM',
-      iv
+      iv: toBuffer(iv)
     },
     dataKey,
-    rawBytes
+    toBuffer(rawBytes)
   );
 
   const ciphertextWithTag = new Uint8Array(encryptedBuffer);
@@ -199,10 +224,10 @@ export async function decryptData(encryptedBytes: Uint8Array, dataKey: CryptoKey
   const decryptedBuffer = await subtle.decrypt(
     {
       name: 'AES-GCM',
-      iv
+      iv: toBuffer(iv)
     },
     dataKey,
-    ciphertextWithTag
+    toBuffer(ciphertextWithTag)
   );
 
   return new Uint8Array(decryptedBuffer);
@@ -228,7 +253,7 @@ export async function calculateContentHmac(data: Uint8Array | string, hmacKey: C
   const signatureBuffer = await subtle.sign(
     'HMAC',
     hmacKey,
-    rawBytes
+    toBuffer(rawBytes)
   );
 
   return bytesToHex(new Uint8Array(signatureBuffer));
