@@ -181,8 +181,13 @@ export interface ChangesResponse {
   vaultId: string;
   latestVersion: number;
   changes: FileChange[];
-  /** True when more changes remain above this page; the client must keep pulling. */
-  hasMore: boolean;
+  /**
+   * True when more changes remain above this page. Optional so older servers
+   * (which return the full history in one response) stay compatible: clients
+   * must treat an absent flag as "maybe more" and keep pulling until a page
+   * comes back short.
+   */
+  hasMore?: boolean;
 }
 
 export interface BlobCheckResponse {
