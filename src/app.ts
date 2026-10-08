@@ -43,6 +43,7 @@ import {
   readJson
 } from './request-validation';
 import { SlidingWindowRateLimiter, clientIpFromHeaders } from './rate-limit';
+import { logger } from './logger';
 
 export type AppContext = {
   Variables: {
@@ -74,10 +75,11 @@ export interface AppConfig {
   corsOrigins?: string[];
   /** Sliding-window login throttling; defaults to 10 failures per 10 minutes per IP. */
   loginRateLimit?: { maxAttempts?: number; windowSeconds?: number };
+  /** Synthetic checks contributed by the entry point (e.g. disk space on Node; absent on Worker). */
+  extraHealthChecks?: Array<{ name: string; check: () => Promise<Record<string, unknown>> }>;
   /** Enables POST /api/v1/ws/ticket; absent on deployments without WebSocket support (Worker). */
   wsTicketSecret?: string;
 }
-
 const DEFAULT_GC_GRACE_DAYS = 7;
 const MAX_GC_GRACE_DAYS = 90;
 const MAX_GC_PAGES = 10000;
@@ -103,7 +105,7 @@ export function createApp(config?: AppConfig) {
     if (error instanceof StorageNotFoundError) {
       return c.json({ error: error.message }, 404);
     }
-    console.error('[API] Unhandled request error:', error);
+    logger.error('[API] Unhandled request error', { error });
     return c.json({ error: 'Internal server error' }, 500);
   });
 
@@ -114,7 +116,7 @@ export function createApp(config?: AppConfig) {
   if (corsOrigins.length > 0) {
     app.use('*', cors({ origin: corsOrigins }));
   } else {
-    console.warn('[Config] CORS_ORIGINS is not set; accepting API calls from any browser origin. Set CORS_ORIGINS to a comma-separated allowlist in production.');
+    logger.warn('[Config] CORS_ORIGINS is not set; accepting API calls from any browser origin. Set CORS_ORIGINS to a comma-separated allowlist in production.');
     app.use('*', cors());
   }
 
@@ -156,12 +158,40 @@ export function createApp(config?: AppConfig) {
   app.get('/api/v1/health', healthHandler);
   app.get('/api/v1/healthz', healthHandler);
   app.get('/api/v1/readyz', async (c) => {
+    const checks: Record<string, unknown> = {};
+    let ready = true;
+    const fail = (name: string, error: unknown) => {
+      ready = false;
+      checks[name] = { status: 'error', error: error instanceof Error ? error.message : String(error) };
+    };
+
     try {
       await c.get('metadata').getAdminStats();
-      return c.json({ status: 'ready', time: Date.now() });
-    } catch {
-      return c.json({ status: 'not_ready' }, 503);
+      checks.metadata = { status: 'ok' };
+    } catch (error) {
+      fail('metadata', error);
     }
+
+    // Blob write probe: proves the whole write path (permissions, bucket
+    // policy, disk) instead of just "the process is alive".
+    try {
+      const blobs = c.get('blobs');
+      await blobs.put('__health__', 'readyz-probe', new Uint8Array([1]));
+      await blobs.deleteBlob('__health__', 'readyz-probe');
+      checks.blobs = { status: 'ok' };
+    } catch (error) {
+      fail('blobs', error);
+    }
+
+    for (const extra of config?.extraHealthChecks || []) {
+      try {
+        checks[extra.name] = { status: 'ok', ...(await extra.check()) };
+      } catch (error) {
+        fail(extra.name, error);
+      }
+    }
+
+    return c.json({ status: ready ? 'ready' : 'not_ready', time: Date.now(), checks }, ready ? 200 : 503);
   });
 
   // ==================== AUTH ROUTES ====================
@@ -422,7 +452,7 @@ export function createApp(config?: AppConfig) {
       if (err instanceof StorageNotFoundError) {
         return c.json({ error: err.message }, 404);
       }
-      console.error('[API] Commit failed:', err);
+      logger.error('[API] Commit failed', { error: err });
       return c.json({ error: 'Commit failed' }, 500);
     }
   });
@@ -746,7 +776,7 @@ export function createApp(config?: AppConfig) {
       const updated = await metadata.updateDeletionJob(job.jobId, 'completed');
       return c.json({ success: true, jobId: job.jobId, status: updated?.status || 'completed' });
     } catch (error) {
-      console.error('[API] Vault deletion failed:', error);
+      logger.error('[API] Vault deletion failed', { error });
       const message = error instanceof Error ? error.message : String(error);
       const updated = await metadata.updateDeletionJob(job.jobId, 'failed', message).catch(() => null);
       return c.json(
@@ -906,7 +936,7 @@ export function createApp(config?: AppConfig) {
     const salt = newSalt();
     const passwordHash = await hashPassword(password, salt);
     const user = await metadata.createUser(username, passwordHash, salt, role);
-    console.log(`[AUDIT] action=admin-create-user actor="${c.get('currentUser')?.username}" username="${username}" userId=${user.id} role=${role}`);
+    logger.info(`[AUDIT] action=admin-create-user actor="${c.get('currentUser')?.username}" username="${username}" userId=${user.id} role=${role}`);
 
     return c.json({ user }, 201);
   });
@@ -923,7 +953,7 @@ export function createApp(config?: AppConfig) {
     const passwordHash = await hashPassword(body.password, salt);
     // Role is preserved (omitted): a password reset must never change privileges.
     await metadata.updateUserPassword(target.id, passwordHash, salt);
-    console.log(`[AUDIT] action=admin-password-reset actor="${c.get('currentUser')?.username}" username="${target.username}" userId=${target.id}`);
+    logger.info(`[AUDIT] action=admin-password-reset actor="${c.get('currentUser')?.username}" username="${target.username}" userId=${target.id}`);
     return c.json({ success: true });
   });
 
@@ -942,14 +972,14 @@ export function createApp(config?: AppConfig) {
         await metadata.updateDeletionJob(job.jobId, 'completed');
         jobs.push({ vaultId: v.id, jobId: job.jobId, status: 'completed' });
       } catch (error) {
-        console.error(`[API] Vault ${v.id} deletion failed:`, error);
+        logger.error(`[API] Vault ${v.id} deletion failed`, { error });
         const message = error instanceof Error ? error.message : String(error);
         const updated = await metadata.updateDeletionJob(job.jobId, 'failed', message).catch(() => null);
         jobs.push({ vaultId: v.id, jobId: job.jobId, status: updated?.status || 'failed' });
       }
     }
     await metadata.deleteUser(userId);
-    console.log(`[AUDIT] action=admin-delete-user actor="${c.get('currentUser')?.username}" userId=${userId} vaults=${jobs.length}`);
+    logger.info(`[AUDIT] action=admin-delete-user actor="${c.get('currentUser')?.username}" userId=${userId} vaults=${jobs.length}`);
     return c.json({ success: true, jobs });
   });
 

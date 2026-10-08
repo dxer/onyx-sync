@@ -1,4 +1,5 @@
 import { hashPassword, newSalt } from './auth-utils';
+import { logger } from './logger';
 import type { IMetadataStore } from './storage/types';
 
 export type AdminBootstrapResult = 'created' | 'already-exists' | 'skipped';
@@ -23,7 +24,7 @@ export async function ensureAdminFromEnv(
   metadataStore: IMetadataStore,
   options: AdminBootstrapOptions = {}
 ): Promise<AdminBootstrapResult> {
-  const log = options.log || console.log;
+  const log = options.log || ((message: string) => logger.info(message));
   const adminUsername = options.adminUsername?.trim();
   const adminPassword = options.adminPassword;
 

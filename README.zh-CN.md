@@ -191,7 +191,6 @@ DELETE /api/v1/user/tokens/:tokenId       # 吊销凭据
 
 **最后一位管理员也被锁住**——需要能登录服务器本机（有这权限本来就能动全部数据，
 所以这条路是安全的，而 `.env` 改密码则不是）：
-
 ```bash
 # Node / Docker（SQLite），密码走环境变量可避免进 shell 历史：
 ONYX_RESET_PASSWORD=<新密码> pnpm admin:reset-password -- --username admin
@@ -207,6 +206,19 @@ pnpm admin:hash-password -- --password <新密码>
 wrangler d1 execute onyx-db --command \
   "UPDATE users SET password_hash = '<哈希>', salt = '<盐值>' WHERE username = 'admin';"
 ```
+
+---
+
+## 运维要点（单节点模式）
+
+- **只跑 1 个副本**：限流、WebSocket 广播、ticket 去重都在进程内存里，多副本会互相踩。启动日志每次都会声明这一点。
+- **备份**：详见 [docs/backup-restore.md](docs/backup-restore.md)——SQLite 用
+  `VACUUM INTO` 在线快照 + `rsync` 拷 blobs，每次用 `integrity_check` 验证，
+  没演练过的备份等于没有。
+- **日志**：`LOG_LEVEL`（默认 `info`）、`LOG_FORMAT=json` 供 Loki/ELK 采集；
+  `[AUDIT]` 行请接入持久化存储。
+- **停机**：`SIGTERM` 会先排水再退出（宽限 `SHUTDOWN_TIMEOUT_MS`，默认 10 秒，
+  compose 里 `stop_grace_period` 已配 30 秒）。
 
 ---
 

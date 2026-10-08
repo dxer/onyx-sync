@@ -153,6 +153,9 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 | `CORS_ORIGINS` | — (allow all) | Comma-separated browser origins allowed to call the API (e.g. a separately hosted dashboard) |
 | `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | `10` | Failed logins allowed per IP per window |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `600` | Rate-limit window for failed logins |
+| `LOG_LEVEL` | `info` | Log verbosity: `debug` / `info` / `warn` / `error` |
+| `LOG_FORMAT` | `text` | `text` for humans, `json` (one object per line) for Loki/ELK |
+| `SHUTDOWN_TIMEOUT_MS` | `10000` | Drain grace period on SIGTERM/SIGINT before forced exit |
 
 ---
 
@@ -173,6 +176,12 @@ The server speaks plain HTTP itself — put it behind an HTTPS reverse proxy
 - **`ADMIN_PASSWORD`**: consumed exactly once, on first boot, to create the
   admin account. Later edits are ignored — rotate passwords in the console
   (Users → Reset password) instead.
+- **Single-node only**: rate limiting, WebSocket fan-out and the WS ticket
+  replay cache live in process memory. Never run more than 1 replica; the
+  server logs this at every boot.
+- **Backups**: follow [docs/backup-restore.md](docs/backup-restore.md)
+  (SQLite `VACUUM INTO` + blob `rsync`, verified with `integrity_check`).
+  An unverified backup is not a backup — rehearse a restore before you need one.
 - **Audit trail**: admin creation, user creation/deletion and every password
   reset are logged as `[AUDIT] action=…` lines. Ship server logs to persistent
   storage; they are your proof of who changed what.

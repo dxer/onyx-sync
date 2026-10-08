@@ -19,6 +19,7 @@ import type {
   TokenValidationResult
 } from './types';
 import { StorageConflictError, StorageNotFoundError } from './errors';
+import { logger } from '../logger';
 import { newTokenSecret, tokenExpiry } from './token-utils';
 import {
   AUTH_TOKEN_SELECT,
@@ -77,12 +78,12 @@ export class D1MetadataStore implements IMetadataStore {
     } catch (err) {
       // Expected when the column already exists; warn so a genuinely broken
       // migration never fails silently at boot.
-      console.warn('[Migration] Adding users.role column failed (likely already exists):', err);
+      logger.warn('[Migration] Adding users.role column failed (likely already exists)', { error: err });
     }
     try {
       await this.d1.prepare('ALTER TABLE vaults ADD COLUMN user_id TEXT DEFAULT ""').run();
     } catch (err) {
-      console.warn('[Migration] Adding vaults.user_id column failed (likely already exists):', err);
+      logger.warn('[Migration] Adding vaults.user_id column failed (likely already exists)', { error: err });
     }
 
     await this.migrateLegacyUserTokens();
@@ -96,7 +97,7 @@ export class D1MetadataStore implements IMetadataStore {
         await this.d1.batch(indexBatch);
       } catch (err) {
         // Indexes use IF NOT EXISTS; a failure here means something else broke.
-        console.warn('[Migration] Index creation failed:', err);
+        logger.warn('[Migration] Index creation failed', { error: err });
       }
     }
   }

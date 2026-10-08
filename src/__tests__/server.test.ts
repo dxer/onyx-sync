@@ -14,6 +14,8 @@ import {
   resetUserPassword
 } from '../admin-cli';
 import { buildResetSql, resetD1Password, splitD1Args } from '../admin-reset-d1';
+import { formatLogLine, logger, setLogFormat, setLogLevel, setLogSink } from '../logger';
+import { createShutdownHandler } from '../shutdown';
 import { hashPassword, newSalt } from '../auth-utils';
 import { SqliteMetadataStore } from '../storage/sqlite';
 import { LocalFsBlobStore } from '../storage/fs-blob';
@@ -982,6 +984,135 @@ describe('Admin password reset (console path)', () => {
 
     store.close();
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Structured logger', () => {
+  it('formats text/json lines and filters below-level output', () => {
+    const lines: string[] = [];
+    setLogSink((level, line) => lines.push(`${level}:${line}`));
+    try {
+      setLogLevel('warn');
+      setLogFormat('text');
+      logger.debug('hidden');
+      logger.info('hidden too');
+      logger.warn('shown', { attempts: 3 });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/\[warn\] shown attempts=3/);
+      expect(formatLogLine('error', 'boom', { error: new Error('kaput') }, 'T')).toBe(
+        'T [error] boom error="kaput"'
+      );
+      setLogFormat('json');
+      expect(JSON.parse(formatLogLine('info', 'hi', { n: 2 }, 'T'))).toEqual({
+        time: 'T',
+        level: 'info',
+        msg: 'hi',
+        n: 2
+      });
+    } finally {
+      setLogSink(null);
+      setLogLevel(null);
+      setLogFormat(null);
+    }
+  });
+});
+
+describe('Readiness probe', () => {
+  it('reports per-dependency checks and 503s when any check fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-readyz-'));
+    const store = new SqliteMetadataStore(join(dir, 'readyz.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+
+    const healthy = createApp({ metadata: store, blobs });
+    const res = await healthy.request('/api/v1/readyz');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      status: string;
+      checks: Record<string, { status: string }>;
+    };
+    expect(body.status).toBe('ready');
+    expect(body.checks.metadata).toEqual({ status: 'ok' });
+    expect(body.checks.blobs).toEqual({ status: 'ok' });
+
+    const failing = createApp({
+      metadata: store,
+      blobs,
+      extraHealthChecks: [
+        {
+          name: 'disk',
+          check: async () => {
+            throw new Error('no space left');
+          }
+        }
+      ]
+    });
+    const resBad = await failing.request('/api/v1/readyz');
+    expect(resBad.status).toBe(503);
+    const bodyBad = (await resBad.json()) as {
+      status: string;
+      checks: Record<string, { status: string; error?: string }>;
+    };
+    expect(bodyBad.status).toBe('not_ready');
+    expect(bodyBad.checks.disk.status).toBe('error');
+    expect(bodyBad.checks.disk.error).toBe('no space left');
+
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Graceful shutdown', () => {
+  it('drains in order, runs once, and exits non-zero on failure', async () => {
+    const events: string[] = [];
+    let code = -1;
+    const handler = createShutdownHandler({
+      log: (message) => events.push(message),
+      closeServer: async () => {
+        events.push('server');
+      },
+      closeSockets: () => {
+        events.push('sockets');
+      },
+      checkpointAndClose: () => {
+        events.push('db');
+      },
+      timeoutMs: 1000,
+      exit: (c) => {
+        code = c;
+      }
+    });
+    handler();
+    handler(); // second signal is a no-op
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(events).toEqual([
+      '[Shutdown] Signal received, draining connections...',
+      'server',
+      'sockets',
+      'db',
+      '[Shutdown] Clean exit'
+    ]);
+    expect(code).toBe(0);
+
+    const failingEvents: string[] = [];
+    let failingCode = -1;
+    const failing = createShutdownHandler({
+      log: (message) => failingEvents.push(message),
+      closeServer: async () => {
+        throw new Error('stuck connection');
+      },
+      closeSockets: () => undefined,
+      checkpointAndClose: () => undefined,
+      timeoutMs: 1000,
+      exit: (c) => {
+        failingCode = c;
+      }
+    });
+    failing();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(failingCode).toBe(1);
+    expect(failingEvents.some((line) => line.includes('stuck connection'))).toBe(true);
   });
 });
 

@@ -1,11 +1,13 @@
 import { serve } from '@hono/node-server';
 import { WebSocketServer, WebSocket } from 'ws';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createApp } from './app';
 import { ensureAdminFromEnv } from './admin-bootstrap';
 import { hashPasswordForManualSql, parseAdminResetArgs, parsePasswordArg, parseUsernameArg, resetUserPassword } from './admin-cli';
+import { logger } from './logger';
+import { createShutdownHandler } from './shutdown';
 import { SqliteMetadataStore } from './storage/sqlite';
 import { LocalFsBlobStore } from './storage/fs-blob';
 import { S3BlobStore } from './storage/s3-blob';
@@ -32,7 +34,7 @@ function loadEnv() {
       } catch {
         parseAndInjectEnv(envPath);
       }
-      console.log(`[Config] Loaded environment variables from ${envPath}`);
+      logger.info(`[Config] Loaded environment variables`, { path: envPath });
       break;
     }
   }
@@ -54,7 +56,7 @@ function parseAndInjectEnv(filePath: string) {
       }
     }
   } catch (err) {
-    console.warn(`[Config] Could not parse .env file at ${filePath}:`, err);
+    logger.warn(`[Config] Could not parse .env file`, { path: filePath, error: err });
   }
 }
 
@@ -71,13 +73,14 @@ const MAX_BLOB_CHECKS = Number(process.env.MAX_BLOB_CHECKS) || undefined;
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS) || undefined;
 const LOGIN_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_SECONDS) || undefined;
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS) || 10_000;
 
 // Secret used to sign short-lived WebSocket tickets. An ephemeral fallback keeps
 // single-process deployments working; set WS_TICKET_SECRET to keep tickets valid
 // across restarts.
 const WS_TICKET_SECRET = process.env.WS_TICKET_SECRET || randomBytes(32).toString('hex');
 if (!process.env.WS_TICKET_SECRET) {
-  console.warn('[Config] WS_TICKET_SECRET not set; using an ephemeral secret (outstanding tickets die on restart).');
+  logger.warn('[Config] WS_TICKET_SECRET not set; using an ephemeral secret (outstanding tickets die on restart).');
 }
 
 // 1. Initialize SQLite Metadata Store
@@ -86,7 +89,7 @@ const metadata = new SqliteMetadataStore(DB_PATH);
 // 2. Initialize Blob Store (Local File System or S3)
 let blobs: LocalFsBlobStore | S3BlobStore;
 if (STORAGE_TYPE === 's3') {
-  console.log('[Storage] Initializing S3 Blob Store...');
+  logger.info('[Storage] Initializing S3 Blob Store...');
   blobs = new S3BlobStore({
     endpoint: process.env.S3_ENDPOINT,
     region: process.env.S3_REGION || 'auto',
@@ -96,7 +99,7 @@ if (STORAGE_TYPE === 's3') {
     prefix: process.env.S3_PREFIX
   });
 } else {
-  console.log(`[Storage] Initializing Local File System Blob Store at ${LOCAL_DIR}...`);
+  logger.info(`[Storage] Initializing Local File System Blob Store`, { dir: LOCAL_DIR });
   blobs = new LocalFsBlobStore(LOCAL_DIR);
 }
 
@@ -136,6 +139,21 @@ const notifier: INotifier = {
   }
 };
 
+// Disk-space probe for /readyz (Node only; the Worker has no filesystem).
+// Reports free/total bytes; fails the probe only when the stat itself errors.
+function diskHealthCheck(dir: string) {
+  return {
+    name: 'disk',
+    check: async () => {
+      const { statfsSync } = await import('node:fs');
+      const stats = statfsSync(dir);
+      const freeBytes = Number(stats.bfree) * Number(stats.bsize);
+      const totalBytes = Number(stats.blocks) * Number(stats.bsize);
+      return { path: dir, freeBytes, totalBytes };
+    }
+  };
+}
+
 // 4. Create App with configured stores
 const app = createApp({
   metadata,
@@ -149,6 +167,7 @@ const app = createApp({
     maxAttempts: LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
     windowSeconds: LOGIN_RATE_LIMIT_WINDOW_SECONDS
   },
+  extraHealthChecks: [diskHealthCheck(dirname(DB_PATH))],
   wsTicketSecret: WS_TICKET_SECRET
 });
 
@@ -245,8 +264,37 @@ async function bootstrap() {
     }
   }, 60_000).unref();
 
-  console.log(`🚀 Onyx Sync Server started on http://0.0.0.0:${PORT}`);
-  console.log('🔌 WebSocket real-time endpoint at /api/v1/ws (short-lived ticket auth via POST /api/v1/ws/ticket)');
+  logger.info(`[Server] Listening`, { port: PORT });
+  logger.info('[Server] WebSocket real-time endpoint at /api/v1/ws (short-lived ticket auth via POST /api/v1/ws/ticket)');
+  logger.info('[Mode] Single-node deployment: rate limits, WebSocket fan-out and ticket replay cache live in process memory. Do not run more than 1 replica.');
+
+  // Graceful shutdown: drain HTTP → close sockets → WAL checkpoint + DB close.
+  const shutdown = createShutdownHandler({
+    log: (message) => logger.info(message),
+    closeServer: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((err?: Error) => (err ? reject(err) : resolve()));
+      }),
+    closeSockets: (code, reason) => {
+      for (const client of clients) {
+        try {
+          client.ws.close(code, reason);
+        } catch {
+          // ignore: already gone
+        }
+      }
+      clients.clear();
+      wss.close();
+    },
+    checkpointAndClose: () => {
+      metadata.checkpoint();
+      metadata.close();
+    },
+    timeoutMs: SHUTDOWN_TIMEOUT_MS,
+    exit: (code) => process.exit(code)
+  });
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 // Local recovery subcommands. These run INSTEAD of the server and need only
@@ -260,7 +308,7 @@ async function runAdminSubcommand(command: string, args: string[]): Promise<void
     if (command === 'admin:reset-password') {
       const parsed = parseAdminResetArgs(args);
       const result = await resetUserPassword(store, parsed);
-      console.log(
+      logger.info(
         `[Auth] Password for "${result.username}" has been reset. ` +
           `Ship the [AUDIT] line above to your persistent logs.`
       );
@@ -284,13 +332,13 @@ if (subcommand === 'admin:reset-password' || subcommand === 'admin:hash-password
   runAdminSubcommand(subcommand, process.argv.slice(3)).then(
     () => process.exit(0),
     (err) => {
-      console.error(`[Auth] ${subcommand} failed:`, err instanceof Error ? err.message : err);
+      logger.error(`[Auth] ${subcommand} failed`, { error: err instanceof Error ? err.message : String(err) });
       process.exit(1);
     }
   );
 } else {
   bootstrap().catch((err) => {
-    console.error('Fatal bootstrap error:', err);
+    logger.error('Fatal bootstrap error', { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
   });
 }

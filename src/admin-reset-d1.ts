@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { hashPasswordForManualSql, parseAdminResetArgs } from './admin-cli';
+import { logger } from './logger';
 
 export interface D1ResetOptions {
   db: string;
@@ -67,7 +68,7 @@ export async function resetD1Password(
   const { salt, passwordHash } = await hashPasswordForManualSql(password);
   const sql = buildResetSql(username, salt, passwordHash);
   await runWrangler(['d1', 'execute', db, local ? '--local' : '--remote', '--command', sql]);
-  console.log(
+  logger.info(
     `[AUDIT] action=admin-password-reset-d1 username="${username}" db=${db} target=${local ? 'local' : 'remote'}`
   );
   return { db, local, username };
@@ -86,7 +87,7 @@ if (invokedAsCli) {
   main().then(
     () => process.exit(0),
     (err) => {
-      console.error('[Auth] admin:reset-password:d1 failed:', err instanceof Error ? err.message : err);
+      logger.error('[Auth] admin:reset-password:d1 failed', { error: err instanceof Error ? err.message : String(err) });
       process.exit(1);
     }
   );

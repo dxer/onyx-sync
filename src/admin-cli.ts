@@ -1,5 +1,6 @@
 import { hashPassword, newSalt } from './auth-utils';
 import { assertNewPassword } from './request-validation';
+import { logger } from './logger';
 import type { IMetadataStore } from './storage/types';
 
 export interface AdminResetArgs {
@@ -66,7 +67,7 @@ export async function resetUserPassword(
   const passwordHash = await hashPassword(args.password, salt);
   // Role is intentionally preserved: recovery must never escalate privileges.
   await metadataStore.updateUserPassword(existing.id, passwordHash, salt);
-  console.log(
+  logger.info(
     `[AUDIT] action=admin-password-reset-cli username="${existing.username}" userId=${existing.id}`
   );
   return { userId: existing.id, username: existing.username };

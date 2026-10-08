@@ -23,6 +23,7 @@ import type {
   TokenValidationResult
 } from './types';
 import { StorageConflictError, StorageNotFoundError } from './errors';
+import { logger } from '../logger';
 import { newTokenSecret, tokenExpiry } from './token-utils';
 import {
   AUTH_TOKEN_SELECT,
@@ -64,7 +65,7 @@ export class SqliteMetadataStore implements IMetadataStore {
     } catch (err) {
       // Expected on databases created after the columns existed; warn so a
       // genuinely broken migration never fails silently at boot.
-      console.warn('[Migration] Legacy column check failed:', err);
+      logger.warn('[Migration] Legacy column check failed', { error: err });
     }
 
     this.migrateLegacyUserTokens();
@@ -73,7 +74,7 @@ export class SqliteMetadataStore implements IMetadataStore {
     try {
       this.db.exec(INDEXES_SQL);
     } catch (err) {
-      console.warn('[Migration] Index creation failed:', err);
+      logger.warn('[Migration] Index creation failed', { error: err });
     }
   }
 
@@ -156,6 +157,15 @@ export class SqliteMetadataStore implements IMetadataStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Flushes the WAL back into the database file. Call before close/backup. */
+  checkpoint(): void {
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // best effort: close() below still releases the handle
+    }
   }
 
   private getCommitPayloadHash(changes: CommitChangeItem[]): string {
