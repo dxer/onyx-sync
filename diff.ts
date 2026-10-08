@@ -97,7 +97,7 @@ export function formatConflictFilename(
   timestamp: number = Date.now()
 ): string {
   const date = new Date(timestamp);
-  const pad = (n: number) => n.toString().padStart(2, '0');
+  const pad = (n: number): string => (n < 10 ? '0' + String(n) : String(n));
   const timeStr = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}`;
   
   const lastDot = originalPath.lastIndexOf('.');
