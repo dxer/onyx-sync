@@ -73,6 +73,11 @@ const MAX_BLOB_CHECKS = Number(process.env.MAX_BLOB_CHECKS) || undefined;
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS) || undefined;
 const LOGIN_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_SECONDS) || undefined;
+const MAX_VAULT_BYTES = Number(process.env.MAX_VAULT_BYTES) || undefined;
+// Only enable behind a reverse proxy that overwrites X-Forwarded-For; the
+// header is client-controlled and would otherwise let attackers rotate the
+// login-throttle key at will.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS) || 10_000;
 
 // Secret used to sign short-lived WebSocket tickets. An ephemeral fallback keeps
@@ -114,7 +119,18 @@ interface ConnectedClient {
 const clients = new Set<ConnectedClient>();
 
 // Single-use enforcement for WebSocket tickets (stateless signature + local replay cache)
+// Bounded so a flood of distinct tickets cannot grow memory without bound;
+// Map iterates in insertion order, so eviction drops the oldest entries first.
+const MAX_USED_TICKETS = 5000;
 const usedTickets = new Map<string, number>();
+function trackUsedTicket(jti: string, expiresAt: number): void {
+  usedTickets.set(jti, expiresAt);
+  while (usedTickets.size > MAX_USED_TICKETS) {
+    const oldest = usedTickets.keys().next();
+    if (oldest.done) break;
+    usedTickets.delete(oldest.value);
+  }
+}
 setInterval(() => {
   const now = Date.now();
   for (const [jti, expiresAt] of usedTickets) {
@@ -165,9 +181,11 @@ const app = createApp({
   corsOrigins: CORS_ORIGINS,
   loginRateLimit: {
     maxAttempts: LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
-    windowSeconds: LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    windowSeconds: LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+    trustProxy: TRUST_PROXY
   },
   extraHealthChecks: [diskHealthCheck(dirname(DB_PATH))],
+  maxVaultBytes: MAX_VAULT_BYTES,
   wsTicketSecret: WS_TICKET_SECRET
 });
 
@@ -216,7 +234,7 @@ async function bootstrap() {
       ws.close(4001, 'Unauthorized: Ticket already used');
       return;
     }
-    usedTickets.set(payload.jti, payload.exp);
+    trackUsedTicket(payload.jti, payload.exp);
 
     // Re-check the underlying credential: revocation must survive ticket minting.
     if (!(await metadata.isTokenActive(payload.tokenId))) {
@@ -273,7 +291,11 @@ async function bootstrap() {
     log: (message) => logger.info(message),
     closeServer: () =>
       new Promise<void>((resolve, reject) => {
-        server.close((err?: Error) => (err ? reject(err) : resolve()));
+        try {
+          server.close(() => resolve());
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
       }),
     closeSockets: (code, reason) => {
       for (const client of clients) {
@@ -313,7 +335,7 @@ async function runAdminSubcommand(command: string, args: string[]): Promise<void
           `Ship the [AUDIT] line above to your persistent logs.`
       );
     } else {
-      const username = parseUsernameArg(args) || '<username>';
+      const username = parseUsernameArg(args);
       const password = parsePasswordArg(args);
       const { salt, passwordHash } = await hashPasswordForManualSql(password);
       console.log(`salt: ${salt}`);

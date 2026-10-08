@@ -40,9 +40,9 @@ import {
   parseChangesLimit,
   parseNonNegativeInteger,
   readBodyWithLimit,
-  readJson
+  readJsonWithLimit
 } from './request-validation';
-import { SlidingWindowRateLimiter, clientIpFromHeaders } from './rate-limit';
+import { SlidingWindowRateLimiter, resolveClientIp } from './rate-limit';
 import { logger } from './logger';
 
 export type AppContext = {
@@ -74,15 +74,46 @@ export interface AppConfig {
    */
   corsOrigins?: string[];
   /** Sliding-window login throttling; defaults to 10 failures per 10 minutes per IP. */
-  loginRateLimit?: { maxAttempts?: number; windowSeconds?: number };
+  loginRateLimit?: {
+    maxAttempts?: number;
+    windowSeconds?: number;
+    /**
+     * Honor X-Forwarded-For / X-Real-IP for the limiter key. Off by default:
+     * those headers are client-controlled and would let an attacker rotate
+     * the throttle key at will. Enable only behind a trusted reverse proxy
+     * that overwrites them.
+     */
+    trustProxy?: boolean;
+  };
   /** Synthetic checks contributed by the entry point (e.g. disk space on Node; absent on Worker). */
   extraHealthChecks?: Array<{ name: string; check: () => Promise<Record<string, unknown>> }>;
+  /** Live (non-tombstone) bytes allowed per vault; commits beyond it get 413. Defaults to 10 GiB. */
+  maxVaultBytes?: number;
+  /** Per-token write throttling (counts per rolling minute). */
+  writeRateLimit?: {
+    commitsPerMinute?: number;
+    blobPutsPerMinute?: number;
+    blobChecksPerMinute?: number;
+  };
   /** Enables POST /api/v1/ws/ticket; absent on deployments without WebSocket support (Worker). */
   wsTicketSecret?: string;
 }
 const DEFAULT_GC_GRACE_DAYS = 7;
 const MAX_GC_GRACE_DAYS = 90;
 const MAX_GC_PAGES = 10000;
+// Capped JSON body sizes: auth/token/admin/vault/GC routes carry tiny payloads,
+// blob-existence checks carry hash lists, commits carry change batches.
+const MAX_JSON_BODY_BYTES = 65536;
+const MAX_COMMIT_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_BLOB_CHECK_BODY_BYTES = 256 * 1024;
+
+const DEFAULT_MAX_VAULT_BYTES = 10 * 1024 * 1024 * 1024;
+const DEFAULT_WRITE_RATE_LIMIT = { commitsPerMinute: 60, blobPutsPerMinute: 300, blobChecksPerMinute: 120 };
+
+// Serializes the first-user register path so two concurrent POSTs cannot both
+// observe totalUsers===0. Valid because this is a single-node deployment with
+// one process serving the route (see single-replica note in entry-node.ts).
+let registerChain: Promise<void> = Promise.resolve();
 
 export function createApp(config?: AppConfig) {
   const app = new Hono<AppContext>();
@@ -94,6 +125,17 @@ export function createApp(config?: AppConfig) {
     config?.loginRateLimit?.maxAttempts ?? 10,
     config?.loginRateLimit?.windowSeconds ?? 600
   );
+  // The throttle key is the TCP peer address (or CF-Connecting-IP on Workers)
+  // by default. X-Forwarded-For is client-spoofable and is only honored when
+  // trustProxy is explicitly enabled behind a proxy that overwrites it.
+  const trustProxy = config?.loginRateLimit?.trustProxy ?? false;
+  const maxVaultBytes = config?.maxVaultBytes ?? DEFAULT_MAX_VAULT_BYTES;
+  const writeRateLimit = { ...DEFAULT_WRITE_RATE_LIMIT, ...config?.writeRateLimit };
+  // Per-token write throttles (commits / blob uploads / hash checks), each a
+  // rolling 1-minute window keyed by token id. Single-node memory, like login.
+  const commitLimiter = new SlidingWindowRateLimiter(writeRateLimit.commitsPerMinute, 60);
+  const blobPutLimiter = new SlidingWindowRateLimiter(writeRateLimit.blobPutsPerMinute, 60);
+  const blobCheckLimiter = new SlidingWindowRateLimiter(writeRateLimit.blobChecksPerMinute, 60);
 
   app.onError((error, c) => {
     if (error instanceof RequestValidationError) {
@@ -202,11 +244,20 @@ export function createApp(config?: AppConfig) {
   app.get('/api/v1/auth/setup-status', async (c) => {
     const metadata = c.get('metadata');
     const stats = await metadata.getAdminStats();
-    return c.json({ needsSetup: stats.totalUsers === 0, totalUsers: stats.totalUsers });
+    return c.json({ needsSetup: stats.totalUsers === 0 });
   });
 
   // Register new user (Only allowed on initial setup when totalUsers === 0)
   app.post('/api/v1/auth/register', async (c) => {
+    const run = registerChain.then(() => handleRegister(c));
+    registerChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  });
+
+  async function handleRegister(c: Context<AppContext>) {
     const metadata = c.get('metadata');
     const stats = await metadata.getAdminStats();
 
@@ -217,7 +268,7 @@ export function createApp(config?: AppConfig) {
       );
     }
 
-    const body = await readJson<AuthRegisterRequest>(c.req.raw);
+    const body = await readJsonWithLimit<AuthRegisterRequest>(c.req.raw, MAX_JSON_BODY_BYTES);
     const username = body?.username?.trim();
     const password = body?.password;
     assertNonEmptyString(username, 'username', MAX_USERNAME_LENGTH);
@@ -240,23 +291,22 @@ export function createApp(config?: AppConfig) {
 
     const response: AuthResponse = { user, token };
     return c.json(response, 201);
-  });
+  }
 
-  // User Login (Web dashboard). Failed attempts are throttled per IP; a
-  // success clears the failure history.
+  // User Login (Web dashboard). Failed attempts are throttled per TCP peer
+  // address (or CF-Connecting-IP on Workers); X-Forwarded-For is only honored
+  // when trustProxy is set, because it is client-controlled. A success clears
+  // the failure history.
   app.post('/api/v1/auth/login', async (c) => {
     const metadata = c.get('metadata');
-    const clientIp = clientIpFromHeaders({
-      'x-forwarded-for': c.req.header('x-forwarded-for'),
-      'x-real-ip': c.req.header('x-real-ip')
-    });
+    const clientIp = resolveClientIp(c, trustProxy);
     const limited = loginLimiter.isLimited(clientIp);
     if (limited > 0) {
       c.header('Retry-After', String(limited));
       return c.json({ error: 'Too many login attempts, please try again later' }, 429);
     }
 
-    const body = await readJson<AuthLoginRequest>(c.req.raw);
+    const body = await readJsonWithLimit<AuthLoginRequest>(c.req.raw, MAX_JSON_BODY_BYTES);
 
     const username = body?.username?.trim();
     const password = body?.password;
@@ -384,11 +434,16 @@ export function createApp(config?: AppConfig) {
     const metadata = c.get('metadata');
     const notifier = c.get('notifier');
     const { vault, tokenInfo } = c.get('currentSession')!;
+    const throttled = commitLimiter.registerFailure(`commit:${tokenInfo.tokenId}`);
+    if (throttled > 0) {
+      c.header('Retry-After', String(throttled));
+      return c.json({ error: 'Too many commits, please slow down', code: 'rate-limited' }, 429);
+    }
     const initialSync = await metadata.acquireInitialSync(vault.id, tokenInfo.tokenId, 10 * 60 * 1000);
     if (initialSync === 'busy' || !(await metadata.canCommitInitialSync(vault.id, tokenInfo.tokenId))) {
       return c.json({ error: 'Another device is initializing this vault', code: 'initial-sync-in-progress' }, 409);
     }
-    const payload = await readJson<CommitPayload>(c.req.raw);
+    const payload = await readJsonWithLimit<CommitPayload>(c.req.raw, MAX_COMMIT_BODY_BYTES);
 
     if (!payload || !Array.isArray(payload.changes)) {
       throw new RequestValidationError('Invalid commit payload');
@@ -409,6 +464,17 @@ export function createApp(config?: AppConfig) {
       }
       if (change.id) ids.add(change.id);
       paths.add(change.encryptedPath);
+    }
+
+    // Per-vault quota, checked before any blob I/O: live bytes plus the
+    // incoming batch must fit. Overcounts slightly on same-content rewrites;
+    // that errs toward protection, and GC reclaims the slack.
+    const incomingBytes = payload.changes.reduce((sum, ch) => sum + (ch.isDeleted ? 0 : ch.size), 0);
+    if (incomingBytes > 0) {
+      const currentBytes = await metadata.getVaultTotalBytes(vault.id);
+      if (currentBytes + incomingBytes > maxVaultBytes) {
+        return c.json({ error: 'Vault storage quota exceeded', code: 'vault-quota-exceeded' }, 413);
+      }
     }
 
     // The server is zero-knowledge (contentHash is a client-side HMAC it cannot
@@ -437,9 +503,10 @@ export function createApp(config?: AppConfig) {
     try {
       const result = await metadata.commitChanges(
         vault.id,
-        tokenInfo.deviceName,
+        tokenInfo.tokenId,
         payload.changes,
-        payload.requestId
+        payload.requestId,
+        tokenInfo.deviceName
       );
 
       if (notifier && result.success && !result.replayed) {
@@ -488,8 +555,13 @@ export function createApp(config?: AppConfig) {
   // Sync: Blobs Check
   app.post('/api/v1/sync/blobs/check', async (c) => {
     const blobs = c.get('blobs');
-    const { vault } = c.get('currentSession')!;
-    const body = await readJson<{ hashes: string[] }>(c.req.raw);
+    const { vault, tokenInfo } = c.get('currentSession')!;
+    const throttled = blobCheckLimiter.registerFailure(`check:${tokenInfo.tokenId}`);
+    if (throttled > 0) {
+      c.header('Retry-After', String(throttled));
+      return c.json({ error: 'Too many blob checks, please slow down', code: 'rate-limited' }, 429);
+    }
+    const body = await readJsonWithLimit<{ hashes: string[] }>(c.req.raw, MAX_BLOB_CHECK_BODY_BYTES);
 
     if (!body || !Array.isArray(body.hashes)) {
       throw new RequestValidationError('hashes must be an array');
@@ -511,7 +583,12 @@ export function createApp(config?: AppConfig) {
   // and after every download.
   app.put('/api/v1/sync/blobs/:hash', async (c) => {
     const blobs = c.get('blobs');
-    const { vault } = c.get('currentSession')!;
+    const { vault, tokenInfo } = c.get('currentSession')!;
+    const throttled = blobPutLimiter.registerFailure(`put:${tokenInfo.tokenId}`);
+    if (throttled > 0) {
+      c.header('Retry-After', String(throttled));
+      return c.json({ error: 'Too many blob uploads, please slow down', code: 'rate-limited' }, 429);
+    }
     const hash = c.req.param('hash');
     assertHash(hash);
 
@@ -642,7 +719,7 @@ export function createApp(config?: AppConfig) {
   app.post('/api/v1/user/vaults', async (c) => {
     const metadata = c.get('metadata');
     const user = c.get('currentUser')!;
-    const body = await readJson<{ name: string }>(c.req.raw);
+    const body = await readJsonWithLimit<{ name: string }>(c.req.raw, MAX_JSON_BODY_BYTES);
 
     assertNonEmptyString(body?.name, 'Vault name', MAX_NAME_LENGTH);
     const name = body.name.trim();
@@ -665,7 +742,7 @@ export function createApp(config?: AppConfig) {
     const metadata = c.get('metadata');
     const user = c.get('currentUser')!;
     const vaultId = c.req.param('id');
-    const body = await readJson<{ deviceName: string }>(c.req.raw);
+    const body = await readJsonWithLimit<{ deviceName: string }>(c.req.raw, MAX_JSON_BODY_BYTES);
 
     const deviceName = body?.deviceName?.trim() || 'My Device';
     assertNonEmptyString(deviceName, 'Device name', MAX_NAME_LENGTH);
@@ -695,8 +772,9 @@ export function createApp(config?: AppConfig) {
   // Rename Device for Token
   app.patch('/api/v1/user/tokens/:tokenId', async (c) => {
     const metadata = c.get('metadata');
+    const actor = c.get('currentUser')!;
     const tokenId = c.req.param('tokenId');
-    const body = await readJson<UpdateTokenRequest>(c.req.raw);
+    const body = await readJsonWithLimit<UpdateTokenRequest>(c.req.raw, MAX_JSON_BODY_BYTES);
 
     assertNonEmptyString(body?.deviceName, 'Device name', MAX_NAME_LENGTH);
     const deviceName = body.deviceName.trim();
@@ -705,12 +783,15 @@ export function createApp(config?: AppConfig) {
     if (tokenInfo instanceof Response) return tokenInfo;
 
     await metadata.updateToken(tokenId, deviceName);
+    const owner = await metadata.getUserById(tokenInfo.userId);
+    logger.info(`[AUDIT] action=user-token-rename actor=${JSON.stringify(actor.username)} tokenId=${tokenId} username=${JSON.stringify(owner?.username ?? tokenInfo.userId)} deviceName=${JSON.stringify(deviceName)}`);
     return c.json({ success: true, deviceName });
   });
 
   // Rotate / Regenerate Token for Device
   app.post('/api/v1/user/tokens/:tokenId/rotate', async (c) => {
     const metadata = c.get('metadata');
+    const actor = c.get('currentUser')!;
     const tokenId = c.req.param('tokenId');
 
     const tokenInfo = await getTokenForManagement(c, tokenId);
@@ -719,6 +800,8 @@ export function createApp(config?: AppConfig) {
     const newToken = await metadata.rotateToken(tokenId);
     if (!newToken) return c.json({ error: 'Failed to rotate token' }, 500);
 
+    const owner = await metadata.getUserById(tokenInfo.userId);
+    logger.info(`[AUDIT] action=user-token-rotate actor=${JSON.stringify(actor.username)} tokenId=${tokenId} username=${JSON.stringify(owner?.username ?? tokenInfo.userId)}`);
     return c.json({
       success: true,
       token: newToken,
@@ -730,12 +813,15 @@ export function createApp(config?: AppConfig) {
   // Revoke / Delete Device Token
   app.delete('/api/v1/user/tokens/:tokenId', async (c) => {
     const metadata = c.get('metadata');
+    const actor = c.get('currentUser')!;
     const tokenId = c.req.param('tokenId');
 
     const tokenInfo = await getTokenForManagement(c, tokenId);
     if (tokenInfo instanceof Response) return tokenInfo;
 
     await metadata.deleteToken(tokenId);
+    const owner = await metadata.getUserById(tokenInfo.userId);
+    logger.info(`[AUDIT] action=user-token-revoke actor=${JSON.stringify(actor.username)} tokenId=${tokenId} username=${JSON.stringify(owner?.username ?? tokenInfo.userId)}`);
     return c.json({ success: true });
   });
 
@@ -848,9 +934,14 @@ export function createApp(config?: AppConfig) {
     let graceDays = DEFAULT_GC_GRACE_DAYS;
     let body: { graceDays?: number } | null = null;
     try {
-      body = await c.req.raw.json();
-    } catch {
-      body = null; // empty body → default grace period
+      body = await readJsonWithLimit<{ graceDays?: number }>(c.req.raw, MAX_JSON_BODY_BYTES);
+    } catch (error) {
+      // Empty or malformed body → default grace period; oversize bodies still throw.
+      if (error instanceof RequestValidationError && error.message === 'Invalid JSON body') {
+        body = null;
+      } else {
+        throw error;
+      }
     }
     if (body && body.graceDays !== undefined) {
       if (!Number.isSafeInteger(body.graceDays) || body.graceDays < 0 || body.graceDays > MAX_GC_GRACE_DAYS) {
@@ -876,7 +967,9 @@ export function createApp(config?: AppConfig) {
           kept++;
           continue;
         }
-        if (graceDays > 0 && entry.lastModified !== null && entry.lastModified > cutoff) {
+        // A missing timestamp means "cannot prove it is old": keep it while
+        // any grace period applies. Only graceDays=0 deletes unconditionally.
+        if (graceDays > 0 && (entry.lastModified === null || entry.lastModified > cutoff)) {
           kept++;
           continue;
         }
@@ -886,7 +979,7 @@ export function createApp(config?: AppConfig) {
       cursor = page.nextCursor;
     } while (cursor && ++pages < MAX_GC_PAGES);
 
-    return c.json({ vaultId, scanned, deleted, kept, graceDays });
+    return c.json({ vaultId, scanned, deleted, kept, graceDays, truncated: Boolean(cursor) });
   });
 
   // ==================== ADMIN ROUTES ====================
@@ -919,7 +1012,7 @@ export function createApp(config?: AppConfig) {
 
   app.post('/api/v1/admin/users', checkAdmin, async (c) => {
     const metadata = c.get('metadata');
-    const body = await readJson<AdminCreateUserRequest>(c.req.raw);
+    const body = await readJsonWithLimit<AdminCreateUserRequest>(c.req.raw, MAX_JSON_BODY_BYTES);
 
     const username = body?.username?.trim();
     const password = body?.password;
@@ -938,14 +1031,14 @@ export function createApp(config?: AppConfig) {
     const salt = newSalt();
     const passwordHash = await hashPassword(password, salt);
     const user = await metadata.createUser(username, passwordHash, salt, role);
-    logger.info(`[AUDIT] action=admin-create-user actor="${c.get('currentUser')?.username}" username="${username}" userId=${user.id} role=${role}`);
+    logger.info(`[AUDIT] action=admin-create-user actor=${JSON.stringify(c.get('currentUser')?.username)} username=${JSON.stringify(username)} userId=${user.id} role=${role}`);
 
     return c.json({ user }, 201);
   });
 
   app.post('/api/v1/admin/users/:id/password', checkAdmin, async (c) => {
     const metadata = c.get('metadata');
-    const body = await readJson<{ password: string }>(c.req.raw);
+    const body = await readJsonWithLimit<{ password: string }>(c.req.raw, MAX_JSON_BODY_BYTES);
     assertNewPassword(body?.password);
 
     const target = await metadata.getUserById(c.req.param('id'));
@@ -955,19 +1048,35 @@ export function createApp(config?: AppConfig) {
     const passwordHash = await hashPassword(body.password, salt);
     // Role is preserved (omitted): a password reset must never change privileges.
     await metadata.updateUserPassword(target.id, passwordHash, salt);
-    logger.info(`[AUDIT] action=admin-password-reset actor="${c.get('currentUser')?.username}" username="${target.username}" userId=${target.id}`);
-    return c.json({ success: true });
+    // The password change alone is not enough: outstanding Bearer sessions are
+    // stored server-side, so every token of the user must be revoked too.
+    const revoked = await metadata.revokeUserTokens(target.id);
+    logger.info(`[AUDIT] action=admin-password-reset actor=${JSON.stringify(c.get('currentUser')?.username)} username=${JSON.stringify(target.username)} userId=${target.id} revokedTokens=${revoked}`);
+    return c.json({ success: true, revokedTokens: revoked });
   });
 
   app.delete('/api/v1/admin/users/:id', checkAdmin, async (c) => {
     const metadata = c.get('metadata');
     const blobs = c.get('blobs');
+    const actor = c.get('currentUser')!;
     const userId = c.req.param('id');
+
+    const target = await metadata.getUserById(userId);
+    if (!target) return c.json({ error: 'User not found' }, 404);
+    if (target.id === actor.id) {
+      return c.json({ error: 'Cannot delete your own admin account; ask another admin to perform the deletion' }, 400);
+    }
+    if (target.role === 'admin') {
+      const admins = (await metadata.listAllUsers()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        return c.json({ error: 'Cannot delete the last remaining admin account' }, 400);
+      }
+    }
 
     const vaults = await metadata.listUserVaults(userId);
     const jobs: Array<{ vaultId: string; jobId: string; status: string }> = [];
     for (const v of vaults) {
-      const job = await metadata.createDeletionJob('vault', v.id, userId);
+      const job = await metadata.createDeletionJob('vault', v.id, actor.id);
       try {
         await metadata.deleteVault(v.id);
         await blobs.deleteVault(v.id);
@@ -981,7 +1090,7 @@ export function createApp(config?: AppConfig) {
       }
     }
     await metadata.deleteUser(userId);
-    logger.info(`[AUDIT] action=admin-delete-user actor="${c.get('currentUser')?.username}" userId=${userId} vaults=${jobs.length}`);
+    logger.info(`[AUDIT] action=admin-delete-user actor=${JSON.stringify(actor.username)} username=${JSON.stringify(target.username)} userId=${userId} vaults=${jobs.length}`);
     return c.json({ success: true, jobs });
   });
 

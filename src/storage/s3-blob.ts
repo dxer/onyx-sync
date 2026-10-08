@@ -85,7 +85,7 @@ export class S3BlobStore implements IBlobStore {
       await this.client.send(command);
       return true;
     } catch (error: any) {
-      if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
+      if (error?.name === 'NoSuchKey' || error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
       throw error;
     }
   }

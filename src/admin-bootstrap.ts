@@ -1,5 +1,6 @@
 import { hashPassword, newSalt } from './auth-utils';
 import { logger } from './logger';
+import { assertNewPassword } from './request-validation';
 import type { IMetadataStore } from './storage/types';
 
 export type AdminBootstrapResult = 'created' | 'already-exists' | 'skipped';
@@ -32,12 +33,21 @@ export async function ensureAdminFromEnv(
     return 'skipped';
   }
 
+  try {
+    assertNewPassword(adminPassword);
+  } catch (error) {
+    logger.error(
+      `[Auth] ADMIN_PASSWORD from .env is too weak; skipping bootstrap for ${JSON.stringify(adminUsername)}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return 'skipped';
+  }
+
   const existingUser = await metadataStore.getUserByUsername(adminUsername);
   if (!existingUser) {
     const salt = newSalt();
     const passwordHash = await hashPassword(adminPassword, salt);
     const user = await metadataStore.createUser(adminUsername, passwordHash, salt, 'admin');
-    log(`[AUDIT] action=admin-bootstrap-created username="${adminUsername}" userId=${user.id}`);
+    log(`[AUDIT] action=admin-bootstrap-created username=${JSON.stringify(adminUsername)} userId=${user.id}`);
     return 'created';
   }
 

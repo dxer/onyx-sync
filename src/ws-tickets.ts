@@ -72,7 +72,12 @@ export async function verifyWsTicket(secret: string, ticket: string): Promise<Ws
   } catch {
     return null;
   }
-  const provided = fromBase64Url(signature);
+  let provided: Uint8Array;
+  try {
+    provided = fromBase64Url(signature);
+  } catch {
+    return null;
+  }
   if (provided.byteLength !== expected.byteLength) return null;
   let diff = 0;
   for (let i = 0; i < expected.byteLength; i++) {

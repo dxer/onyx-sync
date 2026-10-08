@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, access, rm, readdir, stat } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, access, rm, rename, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IBlobStore, BlobListPage } from './types';
 import { isValidBlobFileName, normalizeBlobHash } from './blob-utils';
@@ -14,6 +14,26 @@ export class LocalFsBlobStore implements IBlobStore {
 
   async init(): Promise<void> {
     await mkdir(this.blobsDir, { recursive: true });
+    await this.sweepTmpFiles();
+  }
+
+  /** Removes tmp files orphaned by a crash between write and atomic rename. */
+  private async sweepTmpFiles(): Promise<void> {
+    try {
+      const vaults = await readdir(this.blobsDir, { withFileTypes: true });
+      for (const vault of vaults) {
+        if (!vault.isDirectory()) continue;
+        const dir = join(this.blobsDir, vault.name);
+        const entries = await readdir(dir).catch(() => [] as string[]);
+        for (const entry of entries) {
+          if (entry.includes('.tmp-')) {
+            await rm(join(dir, entry), { force: true }).catch(() => undefined);
+          }
+        }
+      }
+    } catch {
+      // best effort: leftover tmp files are invisible to list() anyway
+    }
   }
 
   private sanitize(str: string): string {
@@ -33,8 +53,16 @@ export class LocalFsBlobStore implements IBlobStore {
   async put(vaultId: string, hash: string, data: Uint8Array): Promise<void> {
     const vaultDir = this.getVaultDir(vaultId);
     await mkdir(vaultDir, { recursive: true });
+    // Atomic write: readers (e.g. the commit blob check) never observe a
+    // truncated file, and a crash never leaves a torn blob behind.
     const filePath = this.getFilePath(vaultId, hash);
-    await writeFile(filePath, data);
+    const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      await writeFile(tmpPath, data);
+      await rename(tmpPath, filePath);
+    } finally {
+      await rm(tmpPath, { force: true }).catch(() => undefined);
+    }
   }
 
   async get(vaultId: string, hash: string): Promise<Uint8Array | null> {

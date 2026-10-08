@@ -153,6 +153,8 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 | `CORS_ORIGINS` | — (allow all) | Comma-separated browser origins allowed to call the API (e.g. a separately hosted dashboard) |
 | `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | `10` | Failed logins allowed per IP per window |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `600` | Rate-limit window for failed logins |
+| `TRUST_PROXY` | `0` | Set `1` behind a trusted reverse proxy that overwrites `X-Forwarded-For` (otherwise rate limits key on the TCP peer) |
+| `MAX_VAULT_BYTES` | `10737418240` (10 GiB) | Live-record byte quota per vault; over-quota commits get `413 vault-quota-exceeded` |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `text` | `text` for humans, `json` (one object per line) for Loki/ELK |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | Drain grace period on SIGTERM/SIGINT before forced exit |
@@ -238,6 +240,14 @@ DELETE /api/v1/user/tokens/:tokenId       # revoke credential
 ```
 
 All sync endpoints are automatically scoped to the token's bound vault — cross-vault access is structurally impossible.
+
+**Concurrency contract**: the version clock never loses increments, but there
+is no lost-update protection on file content — two devices committing
+different edits to the same file both succeed as successive versions
+(last-writer-wins per file). The `version-conflict` code is D1-internal
+(CAS exhaustion, "please retry") and never means "your edit overwrote
+someone's". Clients resolve concurrent edits with three-way merge on pull,
+never by expecting a 409 on push.
 
 **Realtime, per deployment**: the Node/Docker server supports WebSocket push — clients
 fetch a 60-second single-use ticket via `POST /api/v1/ws/ticket` and connect to

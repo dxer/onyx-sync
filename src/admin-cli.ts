@@ -67,8 +67,10 @@ export async function resetUserPassword(
   const passwordHash = await hashPassword(args.password, salt);
   // Role is intentionally preserved: recovery must never escalate privileges.
   await metadataStore.updateUserPassword(existing.id, passwordHash, salt);
+  // A password change alone leaves Bearer sessions alive: revoke them too.
+  const revoked = await metadataStore.revokeUserTokens(existing.id);
   logger.info(
-    `[AUDIT] action=admin-password-reset-cli username="${existing.username}" userId=${existing.id}`
+    `[AUDIT] action=admin-password-reset-cli username=${JSON.stringify(existing.username)} userId=${existing.id} revokedTokens=${revoked}`
   );
   return { userId: existing.id, username: existing.username };
 }

@@ -305,7 +305,7 @@ export const DASHBOARD_APP_JS = `const I18N = {
           const dict = I18N[this.lang] || I18N['zh'];
           let str = dict[key] || I18N['zh'][key] || key;
           for (const [k, v] of Object.entries(params)) {
-            str = str.replace(new RegExp('\\\\{' + k + '\\\\}', 'g'), v);
+            str = str.replace(new RegExp('\\\\{' + k + '\\\\}', 'g'), () => v);
           }
           return str;
         },
@@ -1254,7 +1254,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             <div class="px-5 py-3 border-b border-[#eaeaea] flex justify-between items-center bg-[#fafafa]">
               <div>
                 <h4 class="font-semibold text-xs text-black" x-text="t('userMgmtTitle')"></h4>
-                <p class="text-[11px] text-[#888888]" x-text="t('userMgmtSub')"></p>
+                <p class="text-[11px] text-[#888888]" x-text="t('userMgmtDesc')"></p>
               </div>
               <div class="flex items-center space-x-2">
                 <button @click="showCreateUserModal = true" class="text-xs px-3 py-1.5 rounded-md bg-black hover:bg-[#222222] text-white font-medium shadow-xs transition-colors flex items-center space-x-1">

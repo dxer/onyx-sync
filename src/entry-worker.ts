@@ -11,6 +11,7 @@ export interface CloudflareEnv {
   CORS_ORIGINS?: string;
   LOGIN_RATE_LIMIT_MAX_ATTEMPTS?: string;
   LOGIN_RATE_LIMIT_WINDOW_SECONDS?: string;
+  MAX_VAULT_BYTES?: string;
 }
 
 export default {
@@ -29,7 +30,8 @@ export default {
       loginRateLimit: {
         maxAttempts: env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS ? Number(env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS) : undefined,
         windowSeconds: env.LOGIN_RATE_LIMIT_WINDOW_SECONDS ? Number(env.LOGIN_RATE_LIMIT_WINDOW_SECONDS) : undefined
-      }
+      },
+      maxVaultBytes: env.MAX_VAULT_BYTES ? Number(env.MAX_VAULT_BYTES) : undefined
     });
 
     return app.fetch(request, env as any, ctx);

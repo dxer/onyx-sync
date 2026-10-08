@@ -345,6 +345,14 @@ export class D1MetadataStore implements IMetadataStore {
       .run();
   }
 
+  async revokeUserTokens(userId: string): Promise<number> {
+    const res = await this.d1
+      .prepare('DELETE FROM auth_tokens WHERE user_id = ?')
+      .bind(userId)
+      .run();
+    return Number(res.meta?.changes || 0);
+  }
+
   async listUserTokens(userId: string): Promise<UserToken[]> {
     const res = await this.d1
       .prepare(`SELECT ${AUTH_TOKEN_SELECT} FROM auth_tokens WHERE user_id = ? ORDER BY last_used_at DESC`)
@@ -474,7 +482,8 @@ export class D1MetadataStore implements IMetadataStore {
     vaultId: string,
     deviceId: string,
     changes: CommitChangeItem[],
-    requestId?: string
+    requestId?: string,
+    deviceName?: string
   ): Promise<CommitResult> {
     const payloadHash = await this.getCommitPayloadHash(changes);
 
@@ -579,17 +588,20 @@ export class D1MetadataStore implements IMetadataStore {
           .prepare(
             `INSERT INTO devices (id, vault_id, device_name, last_seen)
              VALUES (?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`
+             ON CONFLICT(id) DO UPDATE SET device_name = excluded.device_name, last_seen = excluded.last_seen`
           )
-          .bind(deviceId, vaultId, deviceId, now)
+          .bind(deviceId, vaultId, deviceName || deviceId, now)
       );
 
       let results: D1Result[];
       try {
         results = await this.d1.batch(stmts);
       } catch (err: any) {
-        const message = String(err?.message || err);
-        if (requestId && message.includes('commit_receipts')) {
+        // D1 surfaces constraint violations as `UNIQUE constraint failed:
+        // <table>.<column>`. Match the structured table name rather than
+        // substring-searching the whole message.
+        const constraint = /UNIQUE constraint failed:\s*([a-z_]+)\./i.exec(String(err?.message || err));
+        if (requestId && constraint?.[1] === 'commit_receipts') {
           // A concurrent request with the same requestId won the insert; replay it.
           const receipt = await this.readReceipt(vaultId, requestId);
           if (receipt) {
@@ -606,7 +618,7 @@ export class D1MetadataStore implements IMetadataStore {
             };
           }
         }
-        if (message.includes('file_records')) {
+        if (constraint?.[1] === 'file_records') {
           throw new StorageConflictError(
             'identity-conflict',
             'File identity conflicts with an existing record'
@@ -688,6 +700,14 @@ export class D1MetadataStore implements IMetadataStore {
       .bind(vaultId)
       .all<{ hash: string }>();
     return (res.results || []).map((r) => r.hash);
+  }
+
+  async getVaultTotalBytes(vaultId: string): Promise<number> {
+    const row = await this.d1
+      .prepare('SELECT COALESCE(SUM(size), 0) as total FROM file_records WHERE vault_id = ? AND is_deleted = 0')
+      .bind(vaultId)
+      .first<{ total: number }>();
+    return Number(row?.total || 0);
   }
 
   // Admin analytics
@@ -787,6 +807,7 @@ export class D1MetadataStore implements IMetadataStore {
       stmts.push(this.d1.prepare('DELETE FROM file_records WHERE vault_id = ?').bind(v.id));
       stmts.push(this.d1.prepare('DELETE FROM devices WHERE vault_id = ?').bind(v.id));
       stmts.push(this.d1.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').bind(v.id));
+      stmts.push(this.d1.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ?').bind(v.id));
     }
     stmts.push(this.d1.prepare('DELETE FROM vaults WHERE user_id = ?').bind(userId));
     stmts.push(this.d1.prepare('DELETE FROM auth_tokens WHERE user_id = ?').bind(userId));

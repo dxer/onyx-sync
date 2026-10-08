@@ -13,8 +13,9 @@ import {
   parseUsernameArg,
   resetUserPassword
 } from '../admin-cli';
-import { buildResetSql, resetD1Password, splitD1Args } from '../admin-reset-d1';
+import { buildDeleteTokensSql, buildResetSql, resetD1Password, splitD1Args } from '../admin-reset-d1';
 import { formatLogLine, logger, setLogFormat, setLogLevel, setLogSink } from '../logger';
+import { readJsonWithLimit } from '../request-validation';
 import { createShutdownHandler } from '../shutdown';
 import { hashPassword, newSalt } from '../auth-utils';
 import { SqliteMetadataStore } from '../storage/sqlite';
@@ -1159,9 +1160,12 @@ describe('admin-cli recovery helpers', () => {
       return { stdout: 'ok', stderr: '' };
     });
     expect(result).toEqual({ db: 'onyx-db', local: false, username: 'root' });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(calls[0].slice(0, 4)).toEqual(['d1', 'execute', 'onyx-db', '--remote']);
     expect(calls[0][5]).toMatch(/^UPDATE users SET password_hash = '[a-f0-9]{64}', salt = '[a-f0-9]+' WHERE username = 'root';$/);
+    // Second call revokes every session so the reset actually locks the attacker out.
+    expect(calls[1].slice(0, 4)).toEqual(['d1', 'execute', 'onyx-db', '--remote']);
+    expect(calls[1][5]).toBe("DELETE FROM auth_tokens WHERE user_id = (SELECT id FROM users WHERE username = 'root');");
   });
 
   it('resets in-store passwords without escalating roles; unknown users fail', async () => {
@@ -1186,5 +1190,129 @@ describe('admin-cli recovery helpers', () => {
 
     store.close();
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Abuse controls: token revocation, quota, throttles, caps', () => {
+  it('revokeUserTokens kills every session of the user', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-revoke-'));
+    const store = new SqliteMetadataStore(join(dir, 'revoke.db'));
+    await store.init();
+    try {
+      const salt = newSalt();
+      const user = await store.createUser('erin', await hashPassword('erin-secret-1', salt), salt, 'user');
+      const vault = await store.createVault({ id: 've1', userId: user.id, name: 'E', salt: newSalt() });
+      const t1 = await store.createToken(user.id, '', 'Web');
+      const t2 = await store.createToken(user.id, vault.id, 'Phone');
+      expect(await store.verifyUserMasterToken(t1)).not.toBeNull();
+      expect(await store.verifyToken(t2)).not.toBeNull();
+      expect(await store.revokeUserTokens(user.id)).toBe(2);
+      expect(await store.verifyUserMasterToken(t1)).toBeNull();
+      expect(await store.verifyToken(t2)).toBeNull();
+      expect(await store.revokeUserTokens(user.id)).toBe(0);
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces the per-vault byte quota on commit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-quota-'));
+    const store = new SqliteMetadataStore(join(dir, 'quota.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+    try {
+      const salt = newSalt();
+      const user = await store.createUser('fred', await hashPassword('fred-secret-1', salt), salt, 'user');
+      const vault = await store.createVault({ id: 'vq1', userId: user.id, name: 'Q', salt: newSalt() });
+      expect(await store.getVaultTotalBytes(vault.id)).toBe(0);
+      await store.commitChanges(vault.id, 'dev', [
+        { encryptedPath: 'p1', contentHash: 'h1', size: 100, isDeleted: false, mtime: 1 },
+        { encryptedPath: 'p2', contentHash: 'h2', size: 50, isDeleted: false, mtime: 1 },
+        { encryptedPath: 'p3', contentHash: '', size: 0, isDeleted: true, mtime: 1 }
+      ]);
+      expect(await store.getVaultTotalBytes(vault.id)).toBe(150);
+
+      const deviceToken = await store.createToken(user.id, vault.id, 'Laptop');
+      const tiny = createApp({ metadata: store, blobs, maxVaultBytes: 200 });
+      const over = await tiny.request('/api/v1/sync/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${deviceToken}` },
+        body: JSON.stringify({ requestId: 'q1', changes: [{ encryptedPath: 'p9', contentHash: 'h9', size: 100, isDeleted: false, mtime: 2 }] })
+      });
+      expect(over.status).toBe(413);
+      expect(((await over.json()) as { code: string }).code).toBe('vault-quota-exceeded');
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throttles commits per token with 429 + Retry-After', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-throttle-'));
+    const store = new SqliteMetadataStore(join(dir, 'throttle.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+    try {
+      const salt = newSalt();
+      const user = await store.createUser('gina', await hashPassword('gina-secret-1', salt), salt, 'user');
+      const vault = await store.createVault({ id: 'vt1', userId: user.id, name: 'T', salt: newSalt() });
+      const deviceToken = await store.createToken(user.id, vault.id, 'Laptop');
+      const limited = createApp({ metadata: store, blobs, writeRateLimit: { commitsPerMinute: 3 } });
+      const fire = () =>
+        limited.request('/api/v1/sync/commit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${deviceToken}` },
+          body: JSON.stringify({ changes: [] })
+        });
+      const r1 = await fire();
+      const r2 = await fire();
+      const r3 = await fire();
+      expect(r1.status).not.toBe(429);
+      expect(r2.status).not.toBe(429);
+      expect(r3.status).toBe(429);
+      expect(r3.headers.get('Retry-After')).toBeTruthy();
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes first-user register so only one admin is born', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'obsidian-sync-race-'));
+    const store = new SqliteMetadataStore(join(dir, 'race.db'));
+    await store.init();
+    const blobs = new LocalFsBlobStore(join(dir, 'blobs'));
+    await blobs.init();
+    try {
+      const racy = createApp({ metadata: store, blobs });
+      const fire = (username: string) =>
+        racy.request('/api/v1/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password: 'password123' })
+        });
+      const [a, b] = await Promise.all([fire('first'), fire('second')]);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses).toEqual([201, 403]);
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects oversized JSON bodies before parsing', async () => {
+    const big = new Request('http://x/', { method: 'POST', body: 'x'.repeat(100) });
+    await expect(readJsonWithLimit(big, 10)).rejects.toThrow();
+    const small = new Request('http://x/', { method: 'POST', body: JSON.stringify({ a: 1 }) });
+    await expect(readJsonWithLimit<{ a: number }>(small, 1024)).resolves.toEqual({ a: 1 });
+  });
+
+  it('builds a token-wiping companion statement for manual SQL recovery', () => {
+    expect(buildDeleteTokensSql("o'brien")).toBe(
+      "DELETE FROM auth_tokens WHERE user_id = (SELECT id FROM users WHERE username = 'o''brien');"
+    );
   });
 });

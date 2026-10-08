@@ -456,7 +456,8 @@ export class SqliteMetadataStore implements IMetadataStore {
     vaultId: string,
     deviceId: string,
     changes: CommitChangeItem[],
-    requestId?: string
+    requestId?: string,
+    deviceName?: string
   ): Promise<CommitResult> {
     const transaction = this.db.transaction(() => {
       if (requestId) {
@@ -575,9 +576,9 @@ export class SqliteMetadataStore implements IMetadataStore {
         .prepare(
           `INSERT INTO devices (id, vault_id, device_name, last_seen)
            VALUES (?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`
+           ON CONFLICT(id) DO UPDATE SET device_name = excluded.device_name, last_seen = excluded.last_seen`
         )
-        .run(deviceId, vaultId, deviceId, now);
+        .run(deviceId, vaultId, deviceName || deviceId, now);
 
       return result;
     });
@@ -722,6 +723,18 @@ export class SqliteMetadataStore implements IMetadataStore {
     return this.getDeletionJob(jobId);
   }
 
+  async revokeUserTokens(userId: string): Promise<number> {
+    const result = this.db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(userId);
+    return Number(result.changes);
+  }
+
+  async getVaultTotalBytes(vaultId: string): Promise<number> {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(size), 0) as total FROM file_records WHERE vault_id = ? AND is_deleted = 0')
+      .get(vaultId) as { total: number } | undefined;
+    return Number(row?.total || 0);
+  }
+
   async deleteUser(userId: string): Promise<void> {
     const tx = this.db.transaction(() => {
       const vaults = this.db.prepare('SELECT id FROM vaults WHERE user_id = ?').all(userId) as Array<{
@@ -731,6 +744,7 @@ export class SqliteMetadataStore implements IMetadataStore {
         this.db.prepare('DELETE FROM file_records WHERE vault_id = ?').run(v.id);
         this.db.prepare('DELETE FROM devices WHERE vault_id = ?').run(v.id);
         this.db.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').run(v.id);
+        this.db.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ?').run(v.id);
       }
       this.db.prepare('DELETE FROM vaults WHERE user_id = ?').run(userId);
       this.db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(userId);

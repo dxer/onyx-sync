@@ -130,6 +130,24 @@ export async function readJson<T>(request: Request): Promise<T> {
   }
 }
 
+/**
+ * Parses a JSON body subject to a byte cap. Uses readBodyWithLimit (mirroring
+ * its RequestValidationError contract for oversized bodies) and throws
+ * RequestValidationError('Invalid JSON body') on parse failure.
+ */
+export async function readJsonWithLimit<T>(request: Request, maxBytes: number): Promise<T> {
+  const bytes = await readBodyWithLimit(request, maxBytes);
+  if (bytes.byteLength === 0) {
+    throw new RequestValidationError('Invalid JSON body');
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch (error) {
+    if (error instanceof RequestValidationError) throw error;
+    throw new RequestValidationError('Invalid JSON body');
+  }
+}
+
 export async function readBodyWithLimit(request: Request, maxBytes: number): Promise<Uint8Array> {
   const contentLength = request.headers.get('content-length');
   if (contentLength !== null) {

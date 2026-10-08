@@ -36,6 +36,12 @@ export function buildResetSql(username: string, salt: string, passwordHash: stri
   return `UPDATE users SET password_hash = '${passwordHash}', salt = '${salt}' WHERE username = '${safeUsername}';`;
 }
 
+/** Deletes every auth token of a user so a D1 password reset revokes live sessions. */
+export function buildDeleteTokensSql(username: string): string {
+  const safeUsername = username.replace(/'/g, "''");
+  return `DELETE FROM auth_tokens WHERE user_id = (SELECT id FROM users WHERE username = '${safeUsername}');`;
+}
+
 function execWrangler(args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile('npx', ['wrangler', ...args], { timeout: 120_000 }, (error, stdout, stderr) => {
@@ -68,8 +74,9 @@ export async function resetD1Password(
   const { salt, passwordHash } = await hashPasswordForManualSql(password);
   const sql = buildResetSql(username, salt, passwordHash);
   await runWrangler(['d1', 'execute', db, local ? '--local' : '--remote', '--command', sql]);
+  await runWrangler(['d1', 'execute', db, local ? '--local' : '--remote', '--command', buildDeleteTokensSql(username)]);
   logger.info(
-    `[AUDIT] action=admin-password-reset-d1 username="${username}" db=${db} target=${local ? 'local' : 'remote'}`
+    `[AUDIT] action=admin-password-reset-d1 username=${JSON.stringify(username)} db=${db} target=${local ? 'local' : 'remote'}`
   );
   return { db, local, username };
 }

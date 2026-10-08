@@ -55,6 +55,8 @@ export interface IMetadataStore {
 
   // Token management (secrets are stored hash-only; plaintext is returned exactly once at creation)
   createToken(userId: string, vaultId: string, deviceName: string, options?: CreateTokenOptions): Promise<string>;
+  /** Deletes every token of a user (password reset, account recovery). Returns rows removed. */
+  revokeUserTokens(userId: string): Promise<number>;
   verifyToken(token: string): Promise<TokenValidationResult | null>;
   verifyUserMasterToken(token: string): Promise<User | null>;
   getTokenById(tokenId: string): Promise<UserToken | null>;
@@ -75,7 +77,9 @@ export interface IMetadataStore {
     vaultId: string,
     deviceId: string,
     changes: CommitChangeItem[],
-    requestId?: string
+    requestId?: string,
+    /** Display name for the devices row; deviceId is the stable key. */
+    deviceName?: string
   ): Promise<CommitResult>;
   getVaultActivity(vaultId: string, sinceMs: number): Promise<VaultActivityDay[]>;
   acquireInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<InitialSyncResult>;
@@ -84,6 +88,8 @@ export interface IMetadataStore {
   canCommitInitialSync(vaultId: string, tokenId: string): Promise<boolean>;
   /** Content hashes referenced by live (non-tombstoned) records — the GC keep-set. */
   listActiveBlobHashes(vaultId: string): Promise<string[]>;
+  /** Sum of live (non-tombstone) record sizes; drives the per-vault quota. */
+  getVaultTotalBytes(vaultId: string): Promise<number>;
 
   // Admin management
   getAdminStats(): Promise<AdminStats>;
