@@ -24,6 +24,8 @@ export interface TokenValidationResult {
 
 export type DeletionJobStatus = 'pending' | 'completed' | 'failed';
 
+export type InitialSyncResult = 'acquired' | 'already_initialized' | 'busy';
+
 export interface DeletionJob {
   jobId: string;
   resourceType: 'vault' | 'user';
@@ -76,6 +78,10 @@ export interface IMetadataStore {
     requestId?: string
   ): Promise<CommitResult>;
   getVaultActivity(vaultId: string, sinceMs: number): Promise<VaultActivityDay[]>;
+  acquireInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<InitialSyncResult>;
+  renewInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<boolean>;
+  completeInitialSync(vaultId: string, tokenId: string): Promise<void>;
+  canCommitInitialSync(vaultId: string, tokenId: string): Promise<boolean>;
   /** Content hashes referenced by live (non-tombstoned) records — the GC keep-set. */
   listActiveBlobHashes(vaultId: string): Promise<string[]>;
 

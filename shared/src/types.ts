@@ -33,6 +33,11 @@ export interface SessionInfoResponse {
   serverTime: number;
 }
 
+export interface InitialSyncResponse {
+  status: 'acquired' | 'already_initialized';
+  leaseSeconds?: number;
+}
+
 export interface VaultActivityDay {
   day: string; // YYYY-MM-DD
   count: number;

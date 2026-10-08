@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS commit_receipts (
     PRIMARY KEY (vault_id, request_id)
 );
 
+CREATE TABLE IF NOT EXISTS initial_sync_locks (
+    vault_id TEXT PRIMARY KEY,
+    token_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS file_records (
     id TEXT PRIMARY KEY,
     vault_id TEXT NOT NULL,

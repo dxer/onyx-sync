@@ -403,6 +403,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       this.db.prepare('DELETE FROM devices WHERE vault_id = ?').run(vaultId);
       this.db.prepare('DELETE FROM auth_tokens WHERE vault_id = ?').run(vaultId);
       this.db.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').run(vaultId);
+      this.db.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ?').run(vaultId);
       this.db.prepare('DELETE FROM vaults WHERE id = ?').run(vaultId);
     });
     tx();
@@ -581,6 +582,36 @@ export class SqliteMetadataStore implements IMetadataStore {
       )
       .all(vaultId, sinceMs) as Array<{ day: string; count: number }>;
     return rows;
+  }
+
+  async acquireInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<'acquired' | 'already_initialized' | 'busy'> {
+    const now = Date.now();
+    return this.db.transaction(() => {
+      const vault = this.db.prepare('SELECT latest_version as latestVersion FROM vaults WHERE id = ?').get(vaultId) as { latestVersion: number } | undefined;
+      if (!vault) throw new StorageNotFoundError(`Vault ${vaultId} not found`);
+      const existing = this.db.prepare('SELECT token_id as tokenId, expires_at as expiresAt FROM initial_sync_locks WHERE vault_id = ?').get(vaultId) as { tokenId: string; expiresAt: number } | undefined;
+      if (existing && existing.expiresAt > now && existing.tokenId !== tokenId) return 'busy' as const;
+      if (vault.latestVersion > 0 && (!existing || existing.expiresAt <= now)) return 'already_initialized' as const;
+      this.db.prepare('INSERT INTO initial_sync_locks (vault_id, token_id, expires_at) VALUES (?, ?, ?) ON CONFLICT(vault_id) DO UPDATE SET token_id = excluded.token_id, expires_at = excluded.expires_at').run(vaultId, tokenId, now + leaseMs);
+      return 'acquired' as const;
+    })();
+  }
+
+  async renewInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<boolean> {
+    const result = this.db.prepare('UPDATE initial_sync_locks SET expires_at = ? WHERE vault_id = ? AND token_id = ? AND expires_at > ?').run(Date.now() + leaseMs, vaultId, tokenId, Date.now());
+    return result.changes === 1;
+  }
+
+  async completeInitialSync(vaultId: string, tokenId: string): Promise<void> {
+    this.db.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ? AND token_id = ?').run(vaultId, tokenId);
+  }
+
+  async canCommitInitialSync(vaultId: string, tokenId: string): Promise<boolean> {
+    const vault = this.db.prepare('SELECT latest_version as latestVersion FROM vaults WHERE id = ?').get(vaultId) as { latestVersion: number } | undefined;
+    if (!vault) return false;
+    const lock = this.db.prepare('SELECT token_id as tokenId, expires_at as expiresAt FROM initial_sync_locks WHERE vault_id = ?').get(vaultId) as { tokenId: string; expiresAt: number } | undefined;
+    if (lock && lock.expiresAt > Date.now()) return lock.tokenId === tokenId;
+    return vault.latestVersion > 0;
   }
 
   async listActiveBlobHashes(vaultId: string): Promise<string[]> {

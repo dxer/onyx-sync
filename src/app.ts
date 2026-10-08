@@ -304,6 +304,10 @@ export function createApp(config?: AppConfig) {
     const metadata = c.get('metadata');
     const notifier = c.get('notifier');
     const { vault, tokenInfo } = c.get('currentSession')!;
+    const initialSync = await metadata.acquireInitialSync(vault.id, tokenInfo.tokenId, 10 * 60 * 1000);
+    if (initialSync === 'busy' || !(await metadata.canCommitInitialSync(vault.id, tokenInfo.tokenId))) {
+      return c.json({ error: 'Another device is initializing this vault', code: 'initial-sync-in-progress' }, 409);
+    }
     const payload = await readJson<CommitPayload>(c.req.raw);
 
     if (!payload || !Array.isArray(payload.changes)) {
@@ -350,6 +354,32 @@ export function createApp(config?: AppConfig) {
       console.error('[API] Commit failed:', err);
       return c.json({ error: 'Commit failed' }, 500);
     }
+  });
+
+  // A lease prevents two clients from bootstrapping an empty vault at once.
+  app.post('/api/v1/sync/initialization/start', async (c) => {
+    const metadata = c.get('metadata');
+    const { vault, tokenInfo } = c.get('currentSession')!;
+    const leaseMs = 10 * 60 * 1000;
+    const result = await metadata.acquireInitialSync(vault.id, tokenInfo.tokenId, leaseMs);
+    if (result === 'busy') {
+      return c.json({ error: 'Another device is initializing this vault', code: 'initial-sync-in-progress' }, 409);
+    }
+    return c.json({ status: result, leaseSeconds: Math.floor(leaseMs / 1000) });
+  });
+
+  app.post('/api/v1/sync/initialization/heartbeat', async (c) => {
+    const metadata = c.get('metadata');
+    const { vault, tokenInfo } = c.get('currentSession')!;
+    const renewed = await metadata.renewInitialSync(vault.id, tokenInfo.tokenId, 10 * 60 * 1000);
+    return renewed ? c.json({ success: true }) : c.json({ error: 'Initial sync lease is no longer owned', code: 'initial-sync-in-progress' }, 409);
+  });
+
+  app.post('/api/v1/sync/initialization/complete', async (c) => {
+    const metadata = c.get('metadata');
+    const { vault, tokenInfo } = c.get('currentSession')!;
+    await metadata.completeInitialSync(vault.id, tokenInfo.tokenId);
+    return c.json({ success: true });
   });
 
   // Sync: Blobs Check

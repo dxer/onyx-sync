@@ -2,7 +2,11 @@
  * Typed storage errors so HTTP layers can map status codes without matching
  * human-readable message strings.
  */
-export type StorageConflictCode = 'identity-conflict' | 'request-id-reuse' | 'version-conflict';
+export type StorageConflictCode =
+  | 'identity-conflict'
+  | 'request-id-reuse'
+  | 'version-conflict'
+  | 'initial-sync-in-progress';
 
 export class StorageConflictError extends Error {
   constructor(

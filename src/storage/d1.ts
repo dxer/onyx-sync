@@ -413,6 +413,7 @@ export class D1MetadataStore implements IMetadataStore {
       this.d1.prepare('DELETE FROM devices WHERE vault_id = ?').bind(vaultId),
       this.d1.prepare('DELETE FROM auth_tokens WHERE vault_id = ?').bind(vaultId),
       this.d1.prepare('DELETE FROM commit_receipts WHERE vault_id = ?').bind(vaultId),
+      this.d1.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ?').bind(vaultId),
       this.d1.prepare('DELETE FROM vaults WHERE id = ?').bind(vaultId)
     ]);
   }
@@ -632,6 +633,39 @@ export class D1MetadataStore implements IMetadataStore {
       .bind(vaultId, sinceMs)
       .all<VaultActivityDay>();
     return res.results || [];
+  }
+
+  async acquireInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<'acquired' | 'already_initialized' | 'busy'> {
+    const vault = await this.d1.prepare('SELECT latest_version as latestVersion FROM vaults WHERE id = ?').bind(vaultId).first<{ latestVersion: number }>();
+    if (!vault) throw new StorageNotFoundError(`Vault ${vaultId} not found`);
+    const now = Date.now();
+    const lock = await this.d1.prepare('SELECT token_id as tokenId, expires_at as expiresAt FROM initial_sync_locks WHERE vault_id = ?').bind(vaultId).first<{ tokenId: string; expiresAt: number }>();
+    if (lock && lock.expiresAt > now && lock.tokenId !== tokenId) return 'busy';
+    if (vault.latestVersion > 0 && (!lock || lock.expiresAt <= now)) return 'already_initialized';
+    const result = await this.d1.prepare(
+      `INSERT INTO initial_sync_locks (vault_id, token_id, expires_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(vault_id) DO UPDATE SET token_id = excluded.token_id, expires_at = excluded.expires_at
+       WHERE initial_sync_locks.expires_at <= ? OR initial_sync_locks.token_id = ?`
+    ).bind(vaultId, tokenId, now + leaseMs, now, tokenId).run();
+    return (result.meta?.changes || 0) === 1 ? 'acquired' : 'busy';
+  }
+
+  async renewInitialSync(vaultId: string, tokenId: string, leaseMs: number): Promise<boolean> {
+    const result = await this.d1.prepare('UPDATE initial_sync_locks SET expires_at = ? WHERE vault_id = ? AND token_id = ? AND expires_at > ?').bind(Date.now() + leaseMs, vaultId, tokenId, Date.now()).run();
+    return (result.meta?.changes || 0) === 1;
+  }
+
+  async completeInitialSync(vaultId: string, tokenId: string): Promise<void> {
+    await this.d1.prepare('DELETE FROM initial_sync_locks WHERE vault_id = ? AND token_id = ?').bind(vaultId, tokenId).run();
+  }
+
+  async canCommitInitialSync(vaultId: string, tokenId: string): Promise<boolean> {
+    const vault = await this.d1.prepare('SELECT latest_version as latestVersion FROM vaults WHERE id = ?').bind(vaultId).first<{ latestVersion: number }>();
+    if (!vault) return false;
+    const lock = await this.d1.prepare('SELECT token_id as tokenId, expires_at as expiresAt FROM initial_sync_locks WHERE vault_id = ?').bind(vaultId).first<{ tokenId: string; expiresAt: number }>();
+    if (lock && lock.expiresAt > Date.now()) return lock.tokenId === tokenId;
+    return vault.latestVersion > 0;
   }
 
   async listActiveBlobHashes(vaultId: string): Promise<string[]> {
