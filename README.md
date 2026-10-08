@@ -150,6 +150,28 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 | `STORAGE_LOCAL_DIR` | `./data/blobs` | Blob root (one subfolder per vault) |
 | `S3_*` | — | Endpoint / bucket / keys when `STORAGE_TYPE=s3` |
 | `WS_TICKET_SECRET` | ephemeral | Signs short-lived WebSocket tickets; set it to keep tickets valid across restarts |
+| `CORS_ORIGINS` | — (allow all) | Comma-separated browser origins allowed to call the API (e.g. a separately hosted dashboard) |
+| `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | `10` | Failed logins allowed per IP per window |
+| `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `600` | Rate-limit window for failed logins |
+
+---
+
+## Production Checklist
+
+The server speaks plain HTTP itself — put it behind an HTTPS reverse proxy
+(Caddy, Nginx, …) before exposing it to the internet.
+
+- **HTTPS**: terminate TLS at the proxy; never expose `PORT` directly.
+- **`CORS_ORIGINS`**: set it to the exact origins of any separately hosted
+  dashboard. The bundled dashboard is same-origin and needs no entry; an
+  empty value accepts every browser origin.
+- **Trusted proxy headers**: login rate limiting keys on `X-Forwarded-For`,
+  so the proxy must overwrite (not append to) that header — otherwise a
+  client can spoof its IP and dodge the limit.
+- **`WS_TICKET_SECRET`**: set a stable value, otherwise all WebSocket
+  sessions drop on every restart.
+- **`ADMIN_PASSWORD`**: change it from the example; it is synced into the
+  DB on every boot.
 
 ---
 
@@ -158,7 +180,7 @@ Server config lives in `.env` (see [.env.example](.env.example)):
 ```
 GET    /api/v1/session                    # token handshake: vault, salt, device
 GET    /api/v1/sync/status                # latest version clock
-GET    /api/v1/sync/changes?since=N       # incremental change log
+GET    /api/v1/sync/changes?since=N&limit=M  # incremental change log (paginated, default 200, max 500)
 POST   /api/v1/sync/commit                # push encrypted changes (requestId => idempotent replay)
 POST   /api/v1/sync/blobs/check           # CAS dedup check
 PUT    /api/v1/sync/blobs/:hash           # upload ciphertext blob
