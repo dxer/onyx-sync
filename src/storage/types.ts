@@ -70,7 +70,7 @@ export interface IMetadataStore {
   createVault(vault: { id: string; userId: string; name: string; salt: string }): Promise<Vault>;
   listUserVaults(userId: string): Promise<VaultSummary[]>;
   deleteVault(vaultId: string): Promise<void>;
-  getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]>;
+  getChanges(vaultId: string, sinceVersion: number, limit?: number): Promise<FileChange[]>;
   commitChanges(
     vaultId: string,
     deviceId: string,

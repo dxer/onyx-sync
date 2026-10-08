@@ -409,15 +409,17 @@ export class SqliteMetadataStore implements IMetadataStore {
     tx();
   }
 
-  async getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]> {
+  async getChanges(vaultId: string, sinceVersion: number, limit = 200): Promise<FileChange[]> {
+    const pageSize = Math.max(1, Math.min(500, Math.floor(limit)));
     const rows = this.db
       .prepare(
         `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime
          FROM file_records
          WHERE vault_id = ? AND version > ?
-         ORDER BY version ASC`
+         ORDER BY version ASC
+         LIMIT ?`
       )
-      .all(vaultId, sinceVersion) as Array<{
+      .all(vaultId, sinceVersion, pageSize) as Array<{
       id: string;
       encryptedPath: string;
       contentHash: string;

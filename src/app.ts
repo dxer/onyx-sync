@@ -37,6 +37,7 @@ import {
   assertNewPassword,
   assertNonEmptyString,
   assertRequestId,
+  parseChangesLimit,
   parseNonNegativeInteger,
   readBodyWithLimit,
   readJson
@@ -284,17 +285,19 @@ export function createApp(config?: AppConfig) {
     return c.json(response);
   });
 
-  // Sync: Changes
+  // Sync: Changes (paginated; the client keeps pulling while hasMore is true)
   app.get('/api/v1/sync/changes', async (c) => {
     const metadata = c.get('metadata');
     const { vault } = c.get('currentSession')!;
     const sinceVersion = parseNonNegativeInteger(c.req.query('since') || '0', 'since');
+    const limit = parseChangesLimit(c.req.query('limit'));
 
-    const changes = await metadata.getChanges(vault.id, sinceVersion);
+    const changes = await metadata.getChanges(vault.id, sinceVersion, limit);
     const response: ChangesResponse = {
       vaultId: vault.id,
       latestVersion: vault.latestVersion,
-      changes
+      changes,
+      hasMore: changes.length >= limit
     };
     return c.json(response);
   });
@@ -329,6 +332,29 @@ export function createApp(config?: AppConfig) {
       }
       if (change.id) ids.add(change.id);
       paths.add(change.encryptedPath);
+    }
+
+    // The server is zero-knowledge (contentHash is a client-side HMAC it cannot
+    // recompute), but it can still require that every referenced blob was
+    // uploaded first and that the declared size matches the stored bytes.
+    // Otherwise a commit could point at a missing blob and a later download
+    // would 404 on every other device.
+    const blobs = c.get('blobs');
+    for (const change of payload.changes) {
+      if (change.isDeleted) continue;
+      const blob = await blobs.get(vault.id, change.contentHash);
+      if (!blob) {
+        return c.json(
+          { error: `Blob ${change.contentHash} has not been uploaded`, code: 'blob-missing' },
+          409
+        );
+      }
+      if (blob.byteLength !== change.size) {
+        return c.json(
+          { error: `Blob size mismatch for ${change.contentHash}`, code: 'blob-size-mismatch' },
+          400
+        );
+      }
     }
 
     try {
@@ -415,6 +441,23 @@ export function createApp(config?: AppConfig) {
     const bytes = await readBodyWithLimit(c.req.raw, maxBlobBytes);
     if (bytes.byteLength === 0) {
       return c.json({ error: 'Blob content cannot be empty' }, 400);
+    }
+
+    // Content hashes are client-side HMACs; identical bytes re-uploaded under
+    // the same hash are idempotent, but different bytes under an existing hash
+    // must never silently overwrite stored data.
+    const existing = await blobs.get(vault.id, hash);
+    if (existing) {
+      const identical =
+        existing.byteLength === bytes.byteLength &&
+        existing.every((value, index) => value === bytes[index]);
+      if (!identical) {
+        return c.json(
+          { error: 'A different blob already exists for this hash', code: 'blob-hash-mismatch' },
+          409
+        );
+      }
+      return c.json({ hash, size: existing.byteLength });
     }
 
     await blobs.put(vault.id, hash, bytes);

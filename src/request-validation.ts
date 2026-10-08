@@ -3,6 +3,8 @@ import type { CommitChangeItem } from '@onyx/shared';
 export const DEFAULT_MAX_BLOB_BYTES = 50 * 1024 * 1024;
 export const DEFAULT_MAX_COMMIT_CHANGES = 500;
 export const DEFAULT_MAX_BLOB_CHECKS = 1000;
+export const DEFAULT_CHANGES_PAGE_SIZE = 200;
+export const MAX_CHANGES_PAGE_SIZE = 500;
 export const MAX_HASH_LENGTH = 64;
 export const MAX_PATH_LENGTH = 16 * 1024;
 export const MAX_ID_LENGTH = 128;
@@ -103,6 +105,21 @@ export function parseNonNegativeInteger(value: string | undefined, field: string
     throw new RequestValidationError(`${field} is out of range`);
   }
   return parsed;
+}
+
+/** Page size for GET /api/v1/sync/changes. Defaults to 200, capped at 500. */
+export function parseChangesLimit(value: string | undefined): number {
+  if (value === undefined || value === '') {
+    return DEFAULT_CHANGES_PAGE_SIZE;
+  }
+  if (!/^\d+$/.test(value)) {
+    throw new RequestValidationError('limit must be a positive integer');
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RequestValidationError('limit must be a positive integer');
+  }
+  return Math.min(parsed, MAX_CHANGES_PAGE_SIZE);
 }
 
 export async function readJson<T>(request: Request): Promise<T> {

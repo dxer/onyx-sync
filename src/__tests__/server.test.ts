@@ -574,6 +574,95 @@ describe('Token Capability Session & Partitioned Sync Tests', () => {
     expect((await gc2.json()).deleted).toBe(0);
   });
 
+  it('rejects commits that reference missing blobs, protects stored blobs, and paginates changes', async () => {
+    // Isolated vault so version counters and GC expectations elsewhere are untouched.
+    const vaultRes = await app.request('/api/v1/user/vaults', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${aliceMasterToken}`
+      },
+      body: JSON.stringify({ name: 'Pagination Vault' })
+    });
+    expect(vaultRes.status).toBe(201);
+    const paginationVaultId = (await vaultRes.json()).vault.id;
+
+    const tokenRes = await app.request(`/api/v1/user/vaults/${paginationVaultId}/tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${aliceMasterToken}`
+      },
+      body: JSON.stringify({ deviceName: 'Pagination Device' })
+    });
+    expect(tokenRes.status).toBe(201);
+    const paginationToken = (await tokenRes.json()).token;
+    const auth = { Authorization: `Bearer ${paginationToken}` };
+
+    const putBlob = (hash: string, bytes: Uint8Array) =>
+      app.request(`/api/v1/sync/blobs/${hash}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream', ...auth },
+        body: bytes
+      });
+    const commitFile = (encryptedPath: string, contentHash: string, size: number, requestId: string) =>
+      app.request('/api/v1/sync/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({
+          requestId,
+          changes: [{ encryptedPath, contentHash, size, isDeleted: false, mtime: 1728200010000 }]
+        })
+      });
+
+    const h1 = 'c111111111111111111111111111111111111111111111111111111111111111';
+    const h2 = 'c222222222222222222222222222222222222222222222222222222222222222';
+    const h3 = 'c333333333333333333333333333333333333333333333333333333333333333';
+    const h4 = 'c444444444444444444444444444444444444444444444444444444444444444';
+    const h5 = 'c555555555555555555555555555555555555555555555555555555555555555';
+    const bytes1 = new Uint8Array([9, 9, 9]);
+
+    expect((await putBlob(h1, bytes1)).status).toBe(201);
+    expect((await commitFile('PaginatedPath1', h1, bytes1.byteLength, '7f9c24e84a1b4c1e9d2f000000000011')).status).toBe(200);
+
+    // Referencing a blob that was never uploaded is rejected before any version is allocated.
+    const missing = await commitFile('PaginatedMissing', h2, 3, '7f9c24e84a1b4c1e9d2f000000000012');
+    expect(missing.status).toBe(409);
+    expect((await missing.json()).code).toBe('blob-missing');
+
+    // Declared size must match the stored bytes.
+    const sizeMismatch = await commitFile('PaginatedPath1', h1, 999, '7f9c24e84a1b4c1e9d2f000000000013');
+    expect(sizeMismatch.status).toBe(400);
+    expect((await sizeMismatch.json()).code).toBe('blob-size-mismatch');
+
+    // Different bytes under an existing hash are rejected; identical bytes are idempotent.
+    expect((await putBlob(h1, new Uint8Array([1, 2, 3, 4]))).status).toBe(409);
+    expect((await putBlob(h1, bytes1)).status).toBe(200);
+
+    for (const [index, h] of [h3, h4, h5].entries()) {
+      const bytes = new Uint8Array([index + 1]);
+      expect((await putBlob(h, bytes)).status).toBe(201);
+      const commit = await commitFile(`PaginatedPath${index + 2}`, h, bytes.byteLength, `7f9c24e84a1b4c1e9d2f00000000002${index}`);
+      expect(commit.status).toBe(200);
+    }
+
+    const page1Res = await app.request('/api/v1/sync/changes?since=0&limit=2', { headers: auth });
+    expect(page1Res.status).toBe(200);
+    const page1 = await page1Res.json();
+    expect(page1.changes).toHaveLength(2);
+    expect(page1.hasMore).toBe(true);
+
+    const cursor = page1.changes[1].version;
+    const page2Res = await app.request(`/api/v1/sync/changes?since=${cursor}&limit=2`, { headers: auth });
+    const page2 = await page2Res.json();
+    expect(page2.changes).toHaveLength(2);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.latestVersion).toBe(4);
+
+    const invalidLimit = await app.request('/api/v1/sync/changes?since=0&limit=NaN', { headers: auth });
+    expect(invalidLimit.status).toBe(400);
+  });
+
   it('turns vault deletion into a retryable job when the blob backend fails', async () => {
     // Alice creates a disposable vault
     const vaultRes = await app.request('/api/v1/user/vaults', {

@@ -418,15 +418,17 @@ export class D1MetadataStore implements IMetadataStore {
     ]);
   }
 
-  async getChanges(vaultId: string, sinceVersion: number): Promise<FileChange[]> {
+  async getChanges(vaultId: string, sinceVersion: number, limit = 200): Promise<FileChange[]> {
+    const pageSize = Math.max(1, Math.min(500, Math.floor(limit)));
     const results = await this.d1
       .prepare(
         `SELECT id, encrypted_path as encryptedPath, content_hash as contentHash, size, version, is_deleted as isDeleted, mtime
          FROM file_records
          WHERE vault_id = ? AND version > ?
-         ORDER BY version ASC`
+         ORDER BY version ASC
+         LIMIT ?`
       )
-      .bind(vaultId, sinceVersion)
+      .bind(vaultId, sinceVersion, pageSize)
       .all<{
         id: string;
         encryptedPath: string;
