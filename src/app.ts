@@ -173,11 +173,13 @@ export function createApp(config?: AppConfig) {
     }
 
     // Blob write probe: proves the whole write path (permissions, bucket
-    // policy, disk) instead of just "the process is alive".
+    // policy, disk) instead of just "the process is alive". The key must be a
+    // valid 64-hex hash — every blob store validates it via assertHash.
     try {
       const blobs = c.get('blobs');
-      await blobs.put('__health__', 'readyz-probe', new Uint8Array([1]));
-      await blobs.deleteBlob('__health__', 'readyz-probe');
+      const probeHash = 'f'.repeat(64);
+      await blobs.put('__health__', probeHash, new Uint8Array([1]));
+      await blobs.deleteBlob('__health__', probeHash);
       checks.blobs = { status: 'ok' };
     } catch (error) {
       fail('blobs', error);
