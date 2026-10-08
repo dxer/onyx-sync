@@ -181,6 +181,8 @@ export interface ChangesResponse {
   vaultId: string;
   latestVersion: number;
   changes: FileChange[];
+  /** True when more changes remain above this page; the client must keep pulling. */
+  hasMore: boolean;
 }
 
 export interface BlobCheckResponse {
