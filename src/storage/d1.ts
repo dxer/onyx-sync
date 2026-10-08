@@ -74,10 +74,16 @@ export class D1MetadataStore implements IMetadataStore {
 
     try {
       await this.d1.prepare('ALTER TABLE users ADD COLUMN role TEXT DEFAULT "user"').run();
-    } catch {}
+    } catch (err) {
+      // Expected when the column already exists; warn so a genuinely broken
+      // migration never fails silently at boot.
+      console.warn('[Migration] Adding users.role column failed (likely already exists):', err);
+    }
     try {
       await this.d1.prepare('ALTER TABLE vaults ADD COLUMN user_id TEXT DEFAULT ""').run();
-    } catch {}
+    } catch (err) {
+      console.warn('[Migration] Adding vaults.user_id column failed (likely already exists):', err);
+    }
 
     await this.migrateLegacyUserTokens();
 
@@ -88,7 +94,10 @@ export class D1MetadataStore implements IMetadataStore {
     if (indexBatch.length > 0) {
       try {
         await this.d1.batch(indexBatch);
-      } catch {}
+      } catch (err) {
+        // Indexes use IF NOT EXISTS; a failure here means something else broke.
+        console.warn('[Migration] Index creation failed:', err);
+      }
     }
   }
 

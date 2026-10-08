@@ -61,8 +61,10 @@ export class SqliteMetadataStore implements IMetadataStore {
       if (!vaultCols.includes('user_id')) {
         this.db.exec('ALTER TABLE vaults ADD COLUMN user_id TEXT DEFAULT ""');
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      // Expected on databases created after the columns existed; warn so a
+      // genuinely broken migration never fails silently at boot.
+      console.warn('[Migration] Legacy column check failed:', err);
     }
 
     this.migrateLegacyUserTokens();
@@ -70,8 +72,8 @@ export class SqliteMetadataStore implements IMetadataStore {
     // Safely create indexes after columns exist
     try {
       this.db.exec(INDEXES_SQL);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[Migration] Index creation failed:', err);
     }
   }
 

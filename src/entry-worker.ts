@@ -8,6 +8,9 @@ export interface CloudflareEnv {
   MAX_BLOB_BYTES?: string;
   MAX_COMMIT_CHANGES?: string;
   MAX_BLOB_CHECKS?: string;
+  CORS_ORIGINS?: string;
+  LOGIN_RATE_LIMIT_MAX_ATTEMPTS?: string;
+  LOGIN_RATE_LIMIT_WINDOW_SECONDS?: string;
 }
 
 export default {
@@ -21,7 +24,12 @@ export default {
       blobs,
       maxBlobBytes: env.MAX_BLOB_BYTES ? Number(env.MAX_BLOB_BYTES) : undefined,
       maxCommitChanges: env.MAX_COMMIT_CHANGES ? Number(env.MAX_COMMIT_CHANGES) : undefined,
-      maxBlobChecks: env.MAX_BLOB_CHECKS ? Number(env.MAX_BLOB_CHECKS) : undefined
+      maxBlobChecks: env.MAX_BLOB_CHECKS ? Number(env.MAX_BLOB_CHECKS) : undefined,
+      corsOrigins: (env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
+      loginRateLimit: {
+        maxAttempts: env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS ? Number(env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS) : undefined,
+        windowSeconds: env.LOGIN_RATE_LIMIT_WINDOW_SECONDS ? Number(env.LOGIN_RATE_LIMIT_WINDOW_SECONDS) : undefined
+      }
     });
 
     return app.fetch(request, env as any, ctx);

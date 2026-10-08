@@ -42,6 +42,7 @@ import {
   readBodyWithLimit,
   readJson
 } from './request-validation';
+import { SlidingWindowRateLimiter, clientIpFromHeaders } from './rate-limit';
 
 export type AppContext = {
   Variables: {
@@ -64,6 +65,15 @@ export interface AppConfig {
   maxBlobBytes?: number;
   maxCommitChanges?: number;
   maxBlobChecks?: number;
+  /**
+   * Browser origins allowed to call the API (e.g. a separately hosted
+   * dashboard). The bundled dashboard is served same-origin and needs no
+   * entry here. When empty/omitted every origin is accepted (backwards
+   * compatible, but not recommended for production).
+   */
+  corsOrigins?: string[];
+  /** Sliding-window login throttling; defaults to 10 failures per 10 minutes per IP. */
+  loginRateLimit?: { maxAttempts?: number; windowSeconds?: number };
   /** Enables POST /api/v1/ws/ticket; absent on deployments without WebSocket support (Worker). */
   wsTicketSecret?: string;
 }
@@ -78,6 +88,10 @@ export function createApp(config?: AppConfig) {
   const maxCommitChanges = config?.maxCommitChanges ?? DEFAULT_MAX_COMMIT_CHANGES;
   const maxBlobChecks = config?.maxBlobChecks ?? DEFAULT_MAX_BLOB_CHECKS;
   const wsTicketSecret = config?.wsTicketSecret;
+  const loginLimiter = new SlidingWindowRateLimiter(
+    config?.loginRateLimit?.maxAttempts ?? 10,
+    config?.loginRateLimit?.windowSeconds ?? 600
+  );
 
   app.onError((error, c) => {
     if (error instanceof RequestValidationError) {
@@ -93,8 +107,16 @@ export function createApp(config?: AppConfig) {
     return c.json({ error: 'Internal server error' }, 500);
   });
 
-  // Enable CORS
-  app.use('*', cors());
+  // CORS: the bundled dashboard is same-origin; only origins listed in
+  // CORS_ORIGINS get Access-Control-Allow-Origin for cross-origin browsers.
+  // Native clients (Obsidian app, curl) send no Origin and are unaffected.
+  const corsOrigins = (config?.corsOrigins || []).map((o) => o.trim()).filter(Boolean);
+  if (corsOrigins.length > 0) {
+    app.use('*', cors({ origin: corsOrigins }));
+  } else {
+    console.warn('[Config] CORS_ORIGINS is not set; accepting API calls from any browser origin. Set CORS_ORIGINS to a comma-separated allowlist in production.');
+    app.use('*', cors());
+  }
 
   // Inject dependencies
   app.use('*', async (c, next) => {
@@ -188,9 +210,20 @@ export function createApp(config?: AppConfig) {
     return c.json(response, 201);
   });
 
-  // User Login (Web dashboard)
+  // User Login (Web dashboard). Failed attempts are throttled per IP; a
+  // success clears the failure history.
   app.post('/api/v1/auth/login', async (c) => {
     const metadata = c.get('metadata');
+    const clientIp = clientIpFromHeaders({
+      'x-forwarded-for': c.req.header('x-forwarded-for'),
+      'x-real-ip': c.req.header('x-real-ip')
+    });
+    const limited = loginLimiter.isLimited(clientIp);
+    if (limited > 0) {
+      c.header('Retry-After', String(limited));
+      return c.json({ error: 'Too many login attempts, please try again later' }, 429);
+    }
+
     const body = await readJson<AuthLoginRequest>(c.req.raw);
 
     const username = body?.username?.trim();
@@ -200,13 +233,25 @@ export function createApp(config?: AppConfig) {
 
     const userSecret = await metadata.getUserByUsername(username);
     if (!userSecret) {
+      const retryAfter = loginLimiter.registerFailure(clientIp);
+      if (retryAfter > 0) {
+        c.header('Retry-After', String(retryAfter));
+        return c.json({ error: 'Too many login attempts, please try again later' }, 429);
+      }
       return c.json({ error: 'Invalid username or password' }, 401);
     }
 
     const computedHash = await hashPassword(password, userSecret.salt);
     if (computedHash !== userSecret.passwordHash) {
+      const retryAfter = loginLimiter.registerFailure(clientIp);
+      if (retryAfter > 0) {
+        c.header('Retry-After', String(retryAfter));
+        return c.json({ error: 'Too many login attempts, please try again later' }, 429);
+      }
       return c.json({ error: 'Invalid username or password' }, 401);
     }
+
+    loginLimiter.reset(clientIp);
 
     const token = await metadata.createToken(userSecret.id, '', 'Web Dashboard');
     const user: User = {

@@ -52,7 +52,9 @@ function parseAndInjectEnv(filePath: string) {
         }
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn(`[Config] Could not parse .env file at ${filePath}:`, err);
+  }
 }
 
 loadEnv();
@@ -65,6 +67,9 @@ const LOCAL_DIR = process.env.STORAGE_LOCAL_DIR || join(process.cwd(), 'data', '
 const MAX_BLOB_BYTES = Number(process.env.MAX_BLOB_BYTES) || undefined;
 const MAX_COMMIT_CHANGES = Number(process.env.MAX_COMMIT_CHANGES) || undefined;
 const MAX_BLOB_CHECKS = Number(process.env.MAX_BLOB_CHECKS) || undefined;
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS) || undefined;
+const LOGIN_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_SECONDS) || undefined;
 
 // Secret used to sign short-lived WebSocket tickets. An ephemeral fallback keeps
 // single-process deployments working; set WS_TICKET_SECRET to keep tickets valid
@@ -138,6 +143,11 @@ const app = createApp({
   maxBlobBytes: MAX_BLOB_BYTES,
   maxCommitChanges: MAX_COMMIT_CHANGES,
   maxBlobChecks: MAX_BLOB_CHECKS,
+  corsOrigins: CORS_ORIGINS,
+  loginRateLimit: {
+    maxAttempts: LOGIN_RATE_LIMIT_MAX_ATTEMPTS,
+    windowSeconds: LOGIN_RATE_LIMIT_WINDOW_SECONDS
+  },
   wsTicketSecret: WS_TICKET_SECRET
 });
 
